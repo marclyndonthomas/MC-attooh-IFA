@@ -2,22 +2,25 @@
 
 A single-page React dashboard that runs a Monte Carlo simulation of a portfolio's future value under
 contributions, withdrawals, escalation, lump-sum capital injections, and stochastic market returns.
-Results are shown as percentile bands (P5 / P50 / P75) against a naive linear (no-volatility) projection.
+Results are shown as percentile bands (P5 / P50 / P75) against a naive fixed-return (no-volatility) projection.
 
 Currency labels are in ZAR (R), but the model is currency-agnostic — the number is just a starting value.
 
 ## Features
 
-- **Two simulation modes**
-  - *Independent* — each simulated path draws its own random monthly returns (captures both mean drift and sequence-of-returns risk).
-  - *Same mean* — every path's returns are shifted so its geometric mean equals the expected return exactly, isolating sequence-of-returns risk from mean uncertainty.
+- **Single simulation mode — *variable return and sequence risk*** — every simulated path draws its own
+  random monthly returns, so results carry both an uncertain realised average return and
+  sequence-of-returns risk. (The master simulator also offers a "same mean" mode that holds the average
+  fixed to isolate sequence risk; this attooh IFA variant deliberately leaves it out so there is one consistent
+  basis for every projection shown to a client. The label is worded for advisers explaining the chart to
+  clients, not in statistical terms.)
 - **Contributions** with optional annual escalation (%/yr).
 - **Withdrawals** with optional annual escalation, and rules to *skip* an escalation in a given year:
   - never, only in years with a negative portfolio return, or on a fixed cadence (e.g. every 3rd year).
 - **Capital injections** — one-off lump sums added in a specific year (multiple supported).
 - **Market assumptions** — expected annual return and annual volatility (σ), used to draw normally-distributed monthly returns (Box-Muller `randn()`).
 - **Inflation-adjusted ("real") results** alongside nominal.
-- **Implied CAGR** for each percentile outcome and the linear projection.
+- **Implied CAGR** for each percentile outcome and the fixed-return projection.
 - **Depletion date estimate** — first calendar month/year a percentile path hits zero.
 - **Success/ruin metrics** — % of paths that stay positive, beat the starting value, or are fully depleted.
 - Two live charts (portfolio value over time, and annual withdrawal income over time) rendered with Chart.js, including a shaded P5–P75 band and annotated injection markers.
@@ -73,8 +76,9 @@ where `Z` is a standard normal random draw. The portfolio is stepped month-by-mo
 contributions, withdrawals, any lump-sum injections due that month, and escalation rules at each
 year boundary. Final values across all paths are sorted to read off the 5th/50th/75th percentiles;
 the same percentile logic is applied to the year-by-year portfolio value to draw the percentile bands
-on the chart. A separate "linear" path uses the expected return with zero volatility as a naive
-comparison baseline.
+on the chart. A separate fixed-return path (`linPort` in the code) uses the expected return with zero
+volatility as a naive comparison baseline. Note it still *compounds*, so it is a smooth curve rather
+than a straight line — the UI calls it "fixed return", not "linear", for that reason.
 
 ## Working with this project in Claude Code
 
