@@ -28,6 +28,7 @@ export default function App() {
   const [customEsc, setCustomEsc]     = useState(5);
   const [skipMode, setSkipMode]       = useState("none");
   const [skipEvery, setSkipEvery]     = useState(3);
+  const [guardBand, setGuardBand]     = useState(90);           // % of the expected-balance trajectory below which the guardrail arms
   const [ret, setRet]                 = useState(8);
   const [vol, setVol]                 = useState(15);
   const [years, setYears]             = useState(20);
@@ -87,27 +88,62 @@ export default function App() {
     const wEsc = effEsc / 100;
     const cEsc = contribEsc / 100;
 
-    const lumpMap = {};
-    lumps.forEach(l => { const k = l.year * 12; lumpMap[k] = (lumpMap[k] || 0) + l.amount; });
+    const lumpMap: Record<number, number> = {};
+    lumps.forEach((l: any) => { const k = l.year * 12; lumpMap[k] = (lumpMap[k] || 0) + l.amount; });
 
-    const finals = [], paths = [], wpaths = [];
-    let totSkip = 0, totInc = 0;
+    // Guardrail: fixed "expected balance trajectory", computed ONCE at plan inception.
+    // Deterministic projection at the net return, with withdrawals always escalating at the
+    // full plan rate. It is never re-baselined against actual paths and never sees a freeze —
+    // it is the static yardstick the guardrail measures against for the life of the plan.
+    const guardOn = skipMode === "guard" && wEsc > 0;
+    const bandFrac = guardBand / 100;
+    const expectedBalance = (() => {
+      let val = init, curW = withdraw, curC = contrib;
+      const arr = [val];
+      for (let m = 0; m < months; m++) {
+        if (m > 0 && m % 12 === 0) {
+          if (wEsc > 0) curW *= (1 + wEsc);
+          if (cEsc > 0) curC *= (1 + cEsc);
+        }
+        if (lumpMap[m]) val += lumpMap[m];
+        val = val * (1 + muM) + curC - curW;
+        if (val < 0) val = 0;
+        if ((m + 1) % 12 === 0) arr.push(val);
+      }
+      return arr;
+    })();
 
-    for (let s = 0; s < N; s++) {
-      // Generate raw monthly returns — each path draws independently, so results
-      // carry both mean uncertainty and sequence-of-returns risk.
-      const monthlyReturns = Array.from({ length: months }, () => muM + sigM * randn());
-
+    // Run one path's returns under a chosen escalation policy.
+    // useGuard=false with skipMode "guard" gives the no-guardrail baseline for comparison.
+    const runOnePath = (monthlyReturns: number[], useGuard: boolean) => {
       let val = init, curW = withdraw, curC = contrib, yrStart = init;
       const path = [val], wpath = [curW];
+      const freezeYears = [];
+      let skips = 0, incs = 0;
 
       for (let m = 0; m < months; m++) {
         if (m > 0 && m % 12 === 0) {
-          const yr = m / 12;
+          const yr = m / 12;   // year `yr` just completed; val = balance at end of that year
           if (wEsc > 0) {
-            const neg = yrStart > 0 && (val - yrStart) / yrStart < 0;
-            const skip = skipMode === "negative" ? neg : skipMode === "fixed" ? (yr % skipEvery === 0) : false;
-            if (skip) { totSkip++; } else { curW *= (1 + wEsc); totInc++; }
+            let skip;
+            if (skipMode === "guard") {
+              if (useGuard) {
+                // Compound the 12 months of year `yr` to get that year's market return.
+                let g = 1;
+                for (let k = (yr - 1) * 12; k < yr * 12; k++) g *= (1 + monthlyReturns[k]);
+                const belowTrajectory = val < bandFrac * expectedBalance[yr];
+                const negativeYear = (g - 1) < 0;
+                skip = belowTrajectory && negativeYear;   // BOTH must hold
+                if (skip) freezeYears.push(yr);
+              } else {
+                skip = false;                              // baseline: always escalate
+              }
+            } else {
+              const neg = yrStart > 0 && (val - yrStart) / yrStart < 0;
+              skip = skipMode === "negative" ? neg : skipMode === "fixed" ? (yr % skipEvery === 0) : false;
+            }
+            // No catch-up: a frozen year's increase is permanently forgone, not banked.
+            if (skip) skips++; else { curW *= (1 + wEsc); incs++; }
           }
           if (cEsc > 0) curC *= (1 + cEsc);
           yrStart = val;
@@ -120,7 +156,34 @@ export default function App() {
         if (val < 0) val = 0;
         if ((m + 1) % 12 === 0) path.push(val);
       }
-      finals.push(val); paths.push(path); wpaths.push(wpath);
+      return { final: val, path, wpath, freezeYears, skips, incs };
+    };
+
+    const finals = [], paths = [], wpaths = [];
+    let totSkip = 0, totInc = 0;
+    let totFreeze = 0, freezeOnSuccess = 0, successCount = 0, baseSuccess = 0, pathsFrozen = 0;
+    const freezeByYear = Array(years + 1).fill(0);
+
+    for (let s = 0; s < N; s++) {
+      // Generate raw monthly returns — each path draws independently, so results
+      // carry both mean uncertainty and sequence-of-returns risk.
+      const monthlyReturns = Array.from({ length: months }, () => muM + sigM * randn());
+
+      const r = runOnePath(monthlyReturns, true);
+      totSkip += r.skips; totInc += r.incs;
+
+      if (guardOn) {
+        // Same return sequence, no guardrail — a paired comparison, so any difference in
+        // success rate is the rule's effect and not sampling noise between two draws.
+        const base = runOnePath(monthlyReturns, false);
+        if (base.final > 1) baseSuccess++;
+        totFreeze += r.freezeYears.length;
+        if (r.freezeYears.length) pathsFrozen++;
+        r.freezeYears.forEach(y => { freezeByYear[y]++; });
+        if (r.final > 1) { successCount++; freezeOnSuccess += r.freezeYears.length; }
+      }
+
+      finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath);
     }
 
     finals.sort((a, b) => a - b);
@@ -224,8 +287,18 @@ export default function App() {
       p5a, p50a, p75a, p95a, w5a, w50a, w75a, w95a, linPort, linW, dep, real, avgReturn,
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
+      expectedBalance,
+      guard: guardOn ? {
+        band: guardBand,
+        avgFreezes: totFreeze / N,
+        avgFreezesOnSuccess: successCount ? freezeOnSuccess / successCount : 0,
+        pctSuccessNoGuard: Math.round(100 * baseSuccess / N),
+        pctPathsEverFrozen: Math.round(100 * pathsFrozen / N),
+        freezeByYear,
+        peakFreezeYear: freezeByYear.reduce((bi, v, i, a) => v > a[bi] ? i : bi, 0),
+      } : null,
     });
-  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
+  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
@@ -377,9 +450,17 @@ export default function App() {
         {escMode !== "none" && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Skip escalation when</div>
-            {segRow([["none", "Never"], ["negative", "–ve return"], ["fixed", "Fixed cadence"]], skipMode, setSkipMode)}
+            {segRow([["none", "Never"], ["negative", "–ve return"], ["fixed", "Cadence"], ["guard", "Guardrail"]], skipMode, setSkipMode)}
             {skipMode === "negative" && <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>Skips the increase in any year the portfolio return was negative.</div>}
             {skipMode === "fixed" && sRow("Skip every (years)", 1, 10, 1, skipEvery, setSkipEvery, `Every ${skipEvery} yr${skipEvery > 1 ? "s" : ""}`)}
+            {skipMode === "guard" && (
+              <div>
+                <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
+                  Freezes next year's increase only when <strong>both</strong> are true: the balance is below {guardBand}% of its expected trajectory <strong>and</strong> the year's return was negative. Skipped increases are never caught up later.
+                </div>
+                {sRow("Trajectory band (%)", 50, 100, 1, guardBand, setGuardBand, guardBand + "% of expected", "#185FA5")}
+              </div>
+            )}
             {results && skipMode !== "none" && <div style={{ fontSize: 11, color: "#888", marginBottom: 8 }}>Avg: <strong>{results.avgInc}</strong> inc · <strong>{results.avgSkip}</strong> skipped/path</div>}
           </div>
         )}
@@ -531,6 +612,34 @@ export default function App() {
             );
           })()}
         </div>
+
+        {/* Guardrail impact — only when the rule is active */}
+        {results && results.guard && (() => {
+          const g = results.guard;
+          const lift = results.pctSuccess - g.pctSuccessNoGuard;
+          const cell = (label, value, color, sub) => (
+            <div style={{ flex: 1, minWidth: 110, padding: "8px 12px", borderRight: "1px solid #eee" }}>
+              <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>{label}</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color }}>{value}</div>
+              {sub && <div style={{ fontSize: 11, color: "#bbb", marginTop: 2 }}>{sub}</div>}
+            </div>
+          );
+          return (
+            <div style={{ borderTop: "1px solid #eee", background: "#fbfcfe" }}>
+              <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
+                Withdrawal guardrail impact
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · freeze increase when below {g.band}% of expected trajectory AND year's return is negative</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 4px 10px" }}>
+                {cell("Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
+                {cell("Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
+                {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
+                {cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
+                {cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Portfolio chart */}
         <div style={{ padding: "12px 16px 14px" }}>

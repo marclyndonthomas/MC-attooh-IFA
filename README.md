@@ -16,7 +16,14 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   clients, not in statistical terms.)
 - **Contributions** with optional annual escalation (%/yr).
 - **Withdrawals** with optional annual escalation, and rules to *skip* an escalation in a given year:
-  - never, only in years with a negative portfolio return, or on a fixed cadence (e.g. every 3rd year).
+  - never, only in years with a negative portfolio return, on a fixed cadence (e.g. every 3rd year),
+    or via the **guardrail** below.
+- **Withdrawal guardrail** — freezes next year's increase only when *both* the balance is below a
+  configurable band (default 90%) of a fixed expected-balance trajectory *and* that year's market
+  return was negative. The trajectory is projected once at inception at the net return with
+  withdrawals always escalating, and is never re-baselined against actual paths. Frozen increases are
+  permanently forgone, not banked. Because each path's returns are replayed with and without the rule,
+  the reported improvement is a like-for-like comparison rather than two independent draws.
 - **Capital injections** — one-off lump sums added in a specific year (multiple supported).
 - **Market assumptions** — expected annual return and annual volatility (σ), used to draw normally-distributed monthly returns (Box-Muller `randn()`).
 - **Inflation-adjusted ("real") results** alongside nominal.
