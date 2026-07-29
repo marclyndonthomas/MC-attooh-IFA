@@ -18,6 +18,16 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
 - **Withdrawals** with optional annual escalation, and rules to *skip* an escalation in a given year:
   - never, only in years with a negative portfolio return, on a fixed cadence (e.g. every 3rd year),
     or via the **guardrail** below.
+- **Health-score rule** — freezes next year's increase whenever the health score (below) passes a
+  chosen threshold, default 50%: the point at which plans showing these warning signs more often
+  than not end below 40% of their capital. Because the signs are cumulative it responds to
+  built-up momentum, so unlike the guardrail its strength scales with how stressed the plan is.
+  Measured on shared return sequences at 40 years: on a 2.67% draw it reaches 98% success with
+  3.6 freezes (guardrail: 96%, 5.2 freezes); on a 4.7% draw it reaches 95% where the guardrail
+  manages 17%.
+
+  The odds it consults come from a separate unruled calibration pass, never from paths that
+  already used the rule — otherwise it would be judging itself.
 - **Withdrawal guardrail** — freezes next year's increase only when *both* the balance is below a
   configurable band (default 90%) of a fixed expected-balance trajectory *and* that year's market
   return was negative. The trajectory is projected once at inception at the net return with

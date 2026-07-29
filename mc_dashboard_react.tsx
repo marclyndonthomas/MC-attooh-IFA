@@ -130,6 +130,7 @@ export default function App() {
   const [skipEvery, setSkipEvery]     = useState(3);
   const [guardBand, setGuardBand]     = useState(90);           // % of the expected-balance trajectory below which the guardrail arms
   const [healthYear, setHealthYear]   = useState(5);            // year the health diagnostic reports on (Sandidge's worked example is year 5)
+  const [healthThreshold, setHealthThreshold] = useState(50);   // % odds of failing above which the health rule freezes the increase
   const [ret, setRet]                 = useState(8);
   const [vol, setVol]                 = useState(15);
   const [years, setYears]             = useState(20);
@@ -197,7 +198,13 @@ export default function App() {
     // full plan rate. It is never re-baselined against actual paths and never sees a freeze —
     // it is the static yardstick the guardrail measures against for the life of the plan.
     const guardOn = skipMode === "guard" && wEsc > 0;
+    const healthRuleOn = skipMode === "health" && wEsc > 0;
+    const comparingOn = guardOn || healthRuleOn;   // rules that report a with/without lift
     const bandFrac = guardBand / 100;
+
+    // Set once calibration has run. Null while calibrating, which is what keeps the health
+    // rule from feeding on itself: the odds it consults come from paths that never used it.
+    let afrLookup: ((s: VitalSigns) => number | null) | null = null;
     const expectedBalance = (() => {
       let val = init, curW = withdraw, curC = contrib;
       const arr = [val];
@@ -215,9 +222,11 @@ export default function App() {
     })();
 
     // Run one path's returns under a chosen escalation policy.
-    // useGuard=false with skipMode "guard" gives the no-guardrail baseline for comparison.
-    // trackSigns records Sandidge's vital signs at each year end for the health diagnostic.
-    const runOnePath = (monthlyReturns: number[], useGuard: boolean, trackSigns = false) => {
+    // applyRule=false never freezes — that is both the calibration pass and the no-rule
+    // baseline the with/without comparison is measured against.
+    // needSigns records Sandidge's vital signs at each year end, for the diagnostic and,
+    // when the health rule is active, for the freeze decision itself.
+    const runOnePath = (monthlyReturns: number[], applyRule: boolean, needSigns = false) => {
       let val = init, curW = withdraw, curC = contrib, yrStart = init;
       const path = [val], wpath = [curW];
       const freezeYears = [];
@@ -227,6 +236,7 @@ export default function App() {
       let negYears = 0, bigLosses = 0, overdrawn = 0, ncav = 0;
       let sumNegCav = 0, sumPosCav = 0, sumSqNegRet = 0, sumSqNegCav = 0;
       const signs: VitalSigns[] = [];
+      const track = needSigns || skipMode === "health";
 
       for (let m = 0; m < months; m++) {
         if (m > 0 && m % 12 === 0) {
@@ -240,28 +250,36 @@ export default function App() {
           const yearReturn = g - 1;
           const belowTrajectory = val < bandFrac * expectedBalance[yr];
 
-          if (trackSigns) {
+          let current: VitalSigns | null = null;
+          if (track) {
             const cav = yrStart > 0 ? (val - yrStart) / yrStart : 0;
             if (yearReturn < 0) { negYears++; sumSqNegRet += yearReturn * yearReturn; }
             if (yearReturn <= -0.05) bigLosses++;
             if (cav < 0) { ncav++; sumNegCav += -cav; sumSqNegCav += cav * cav; } else sumPosCav += cav;
             const distRate = val > 0 ? (curW * 12) / val * 100 : Infinity;
             if (distRate / 100 + otherFees / 100 > yearReturn) overdrawn++;
-            signs.push({
+            current = {
               yr, negYears, bigLosses, overdrawn, ncav,
               moro: sumPosCav > 0 ? (sumNegCav / sumPosCav) * 100 : (sumNegCav > 0 ? 999 : 0),
               aer: Math.pow(Math.max(val, 1) / init, 1 / yr) - 1,
               distRate,
               sd: Math.sqrt(sumSqNegRet / yr) * 100,
               scav: Math.sqrt(sumSqNegCav / yr) * 100,
-            });
+            };
+            if (needSigns) signs.push(current);
           }
 
           if (wEsc > 0) {
             let skip;
             if (skipMode === "guard") {
-              // Freeze only when BOTH hold; useGuard=false is the no-rule baseline.
-              skip = useGuard && belowTrajectory && yearReturn < 0;
+              // Freeze only when BOTH hold.
+              skip = applyRule && belowTrajectory && yearReturn < 0;
+              if (skip) freezeYears.push(yr);
+            } else if (skipMode === "health") {
+              // Freeze while the odds of ending below 40% of capital sit above the
+              // threshold. afrLookup is null during calibration, so those paths stay unruled.
+              const a = applyRule && afrLookup && current ? afrLookup(current) : null;
+              skip = a !== null && a > healthThreshold / 100;
               if (skip) freezeYears.push(yr);
             } else {
               const neg = yrStart > 0 && (val - yrStart) / yrStart < 0;
@@ -284,6 +302,11 @@ export default function App() {
       return { final: val, path, wpath, freezeYears, skips, incs, signs };
     };
 
+    // Each path draws independently, so results carry both an uncertain realised
+    // average return and sequence-of-returns risk.
+    const genReturns = () =>
+      Array.from({ length: months }, () => muM + sigM * randn());
+
     const finals: number[] = [], paths: number[][] = [], wpaths: number[][] = [];
     let totSkip = 0, totInc = 0;
     let totFreeze = 0, freezeOnSuccess = 0, successCount = 0, baseSuccess = 0, pathsFrozen = 0;
@@ -291,19 +314,70 @@ export default function App() {
 
     // Health diagnostic only means anything once money is coming out.
     const healthOn = withdraw > 0;
+
+    // ---- Calibration: what happens to a plan like this if nothing is adjusted ----
+    // Always run unruled. That keeps the health rule honest (it cannot consult odds derived
+    // from its own interventions) and makes the quoted odds mean "if no change is made",
+    // which is the only reading under which a warning sign says anything useful.
+    // A few thousand paths is ample for bucket-level rates, so this is capped independently
+    // of the display sample size.
+    const cal = (() => {
+      if (!healthOn) return null;
+      const CAL_N = Math.min(N, 2500);
+      const bucket: Record<string, (v: number) => number> = {
+        negYears:  v => Math.min(Math.round(v), 20),
+        bigLosses: v => Math.min(Math.round(v), 10),
+        overdrawn: v => Math.min(Math.round(v), 25),
+        ncav:      v => Math.min(Math.round(v), 25),
+        moro:      v => Math.min(Math.round(v / 25), 20),
+        aer:       v => Math.max(-10, Math.min(10, Math.round(v * 100))),
+        distRate:  v => Math.min(40, Math.round(v * 2)),
+        sd:        v => Math.min(20, Math.round(v * 2)),
+        scav:      v => Math.min(20, Math.round(v * 2)),
+      };
+      const KEYS = Object.keys(bucket);
+      const tally: Record<string, Record<number, Record<number, [number, number]>>> = {};
+      KEYS.forEach(k => { tally[k] = {}; });
+
+      for (let i = 0; i < CAL_N; i++) {
+        const r = runOnePath(genReturns(), false, true);      // unruled
+        const isFail = r.final <= 0.40 * init;                 // Sandidge's <40% criterion
+        r.signs.forEach(s => {
+          KEYS.forEach(k => {
+            const b = bucket[k]((s as any)[k]);
+            (tally[k][s.yr] ??= {})[b] ??= [0, 0];
+            tally[k][s.yr][b][1]++;
+            if (isFail) tally[k][s.yr][b][0]++;
+          });
+        });
+      }
+
+      // Thin buckets are noise, so report no reading rather than a made-up odds figure.
+      const rateOf = (k: string, yr: number, v: number): number | null => {
+        const cell = tally[k]?.[yr]?.[bucket[k](v)];
+        return cell && cell[1] >= 25 ? cell[0] / cell[1] : null;
+      };
+      const afrOf = (s: VitalSigns): number | null => {
+        const rs = KEYS.map(k => rateOf(k, s.yr, (s as any)[k])).filter((r): r is number => r !== null);
+        return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null;
+      };
+      return { tally, bucket, KEYS, rateOf, afrOf };
+    })();
+
+    // Arm the health rule now that the unruled odds exist.
+    if (cal) afrLookup = cal.afrOf;
+
     const allSigns: VitalSigns[][] = [];
 
     for (let s = 0; s < N; s++) {
-      // Generate raw monthly returns — each path draws independently, so results
-      // carry both mean uncertainty and sequence-of-returns risk.
-      const monthlyReturns = Array.from({ length: months }, () => muM + sigM * randn());
+      const monthlyReturns = genReturns();
 
       const r = runOnePath(monthlyReturns, true, healthOn);
       totSkip += r.skips; totInc += r.incs;
       if (healthOn) allSigns.push(r.signs);
 
-      if (guardOn) {
-        // Same return sequence, no guardrail — a paired comparison, so any difference in
+      if (comparingOn) {
+        // Same return sequence, rule off — a paired comparison, so any difference in
         // success rate is the rule's effect and not sampling noise between two draws.
         const base = runOnePath(monthlyReturns, false);
         if (base.final > 1) baseSuccess++;
@@ -317,49 +391,12 @@ export default function App() {
     }
 
     // ---- Portfolio health (Sandidge's vital signs) ----
-    // Failure rates are calibrated from THIS run rather than his historical database, so the
-    // odds quoted reflect the assumptions actually on screen. Must run before finals is
+    // Reads the median simulated path against the unruled calibration above, so the odds
+    // shown mean "if no cash-flow change is made from here". Must run before finals is
     // sorted below, since the ordering is what ties a path to its recorded signs.
     const health: HealthStats | null = (() => {
-      if (!healthOn || !allSigns.length) return null;
-
-      // Sandidge counts a portfolio as failed at under 40% of starting principal, which
-      // catches plans that limp to the finish as well as those that hit zero.
-      const failed = finals.map(f => f <= 0.40 * init);
-
-      const bucket: Record<string, (v: number) => number> = {
-        negYears:  v => Math.min(Math.round(v), 20),
-        bigLosses: v => Math.min(Math.round(v), 10),
-        overdrawn: v => Math.min(Math.round(v), 25),
-        ncav:      v => Math.min(Math.round(v), 25),
-        moro:      v => Math.min(Math.round(v / 25), 20),
-        aer:       v => Math.max(-10, Math.min(10, Math.round(v * 100))),
-        distRate:  v => Math.min(40, Math.round(v * 2)),
-        sd:        v => Math.min(20, Math.round(v * 2)),
-        scav:      v => Math.min(20, Math.round(v * 2)),
-      };
-      const SIG_KEYS = Object.keys(bucket);
-
-      // tally[key][yr][bucket] = [failures, total]
-      const tally: Record<string, Record<number, Record<number, [number, number]>>> = {};
-      SIG_KEYS.forEach(k => { tally[k] = {}; });
-      allSigns.forEach((signs, i) => {
-        const isFail = failed[i];
-        signs.forEach(s => {
-          SIG_KEYS.forEach(k => {
-            const b = bucket[k]((s as any)[k]);
-            (tally[k][s.yr] ??= {})[b] ??= [0, 0];
-            tally[k][s.yr][b][1]++;
-            if (isFail) tally[k][s.yr][b][0]++;
-          });
-        });
-      });
-
-      // Thin buckets are noise, so report no reading rather than a made-up odds figure.
-      const rateOf = (k: string, yr: number, v: number): number | null => {
-        const cell = tally[k]?.[yr]?.[bucket[k](v)];
-        return cell && cell[1] >= 25 ? cell[0] / cell[1] : null;
-      };
+      if (!healthOn || !allSigns.length || !cal) return null;
+      const { tally, rateOf, afrOf } = cal;
 
       // Sandidge publishes a target per sign per year; his tables are proprietary, so derive
       // the equivalent from this run — the reading at which the odds of failing pass 50%.
@@ -387,13 +424,9 @@ export default function App() {
         }
         return null;   // nothing in range is bad enough to reach even odds
       };
-      const afrOf = (s: VitalSigns): number | null => {
-        const rs = SIG_KEYS.map(k => rateOf(k, s.yr, (s as any)[k])).filter((r): r is number => r !== null);
-        return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null;
-      };
-
       // Sandidge's figure 8: mean health by year, surviving vs depleted, so the divergence
       // between the two groups is visible rather than asserted.
+      const failed = finals.map(f => f <= 0.40 * init);   // his <40%-of-capital criterion
       const sumS = Array(years + 1).fill(0), cntS = Array(years + 1).fill(0);
       const sumD = Array(years + 1).fill(0), cntD = Array(years + 1).fill(0);
       allSigns.forEach((signs, i) => {
@@ -562,7 +595,7 @@ export default function App() {
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
       expectedBalance,
-      guard: guardOn ? {
+      guard: comparingOn ? {
         band: guardBand,
         avgFreezes: totFreeze / N,
         avgFreezesOnSuccess: successCount ? freezeOnSuccess / successCount : 0,
@@ -575,7 +608,7 @@ export default function App() {
     });
     // healthYear is deliberately NOT a dependency — it only picks which precomputed year
     // the diagnostic displays, so moving it must not trigger another simulation run.
-  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
+  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
@@ -727,7 +760,14 @@ export default function App() {
         {escMode !== "none" && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Skip escalation when</div>
-            {segRow([["none", "Never"], ["negative", "–ve return"], ["fixed", "Cadence"], ["guard", "Guardrail"]], skipMode, setSkipMode)}
+            <select value={skipMode} onChange={e => setSkipMode(e.target.value)}
+              style={{ width: "100%", padding: "6px 8px", fontSize: 12, borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#333", cursor: "pointer", marginBottom: 10 }}>
+              <option value="none">Never</option>
+              <option value="negative">After a negative year</option>
+              <option value="fixed">On a fixed cadence</option>
+              <option value="guard">Guardrail — below trajectory and negative</option>
+              <option value="health">Health score — when the odds turn</option>
+            </select>
             {skipMode === "negative" && <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>Skips the increase in any year the portfolio return was negative.</div>}
             {skipMode === "fixed" && sRow("Skip every (years)", 1, 10, 1, skipEvery, setSkipEvery, `Every ${skipEvery} yr${skipEvery > 1 ? "s" : ""}`)}
             {skipMode === "guard" && (
@@ -736,6 +776,14 @@ export default function App() {
                   Freezes next year's increase only when <strong>both</strong> are true: the balance is below {guardBand}% of its expected trajectory <strong>and</strong> the year's return was negative. Skipped increases are never caught up later.
                 </div>
                 {sRow("Trajectory band (%)", 50, 100, 1, guardBand, setGuardBand, guardBand + "% of expected", "#185FA5")}
+              </div>
+            )}
+            {skipMode === "health" && (
+              <div>
+                <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
+                  Freezes next year's increase whenever the health score passes {healthThreshold}% — that is, once a plan showing these warning signs more often than not ends below 40% of its capital. Unlike the guardrail this reacts to <strong>built-up momentum</strong>, so it holds back harder on a stressed plan and leaves a comfortable one alone.
+                </div>
+                {sRow("Act above odds of", 30, 80, 5, healthThreshold, setHealthThreshold, healthThreshold + "% failing", "#185FA5")}
               </div>
             )}
             {results && skipMode !== "none" && <div style={{ fontSize: 11, color: "#888", marginBottom: 8 }}>Avg: <strong>{results.avgInc}</strong> inc · <strong>{results.avgSkip}</strong> skipped/path</div>}
@@ -904,12 +952,12 @@ export default function App() {
           return (
             <div style={{ borderTop: "1px solid #eee", background: "#fbfcfe" }}>
               <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
-                Withdrawal guardrail impact
-                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · freeze increase when below {g.band}% of expected trajectory AND year's return is negative</span>
+                {skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `freeze increase when below ${g.band}% of expected trajectory AND year's return is negative`}</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 4px 10px" }}>
-                {cell("Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
-                {cell("Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
+                {cell(skipMode === "health" ? "Success — no rule" : "Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
+                {cell(skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
                 {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
                 {cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
                 {cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
