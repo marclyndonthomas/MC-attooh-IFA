@@ -1,10 +1,67 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { ReactNode } from "react";
 import { DNA_MODELS, INFLATION_ASSUMPTION } from "./models/dnaModels";
+import type { DnaModel } from "./models/dnaModels";
 import { MONARCH_MODELS } from "./models/monarchModels";
+import type { MonarchModel } from "./models/monarchModels";
+
+// Chart.js is loaded at runtime from a CDN (see the useEffect below), not as an npm
+// dependency, so it arrives as a global rather than an import.
+declare global {
+  interface Window { Chart: any }
+}
+
+/** A one-off lump sum paid into the portfolio in a given year. */
+interface Lump { id: number; amount: number; year: number }
+
+/**
+ * The two ranges carry their cost on differently-named fields, so narrow on the field
+ * itself rather than on the selected range — the shape is the source of truth.
+ */
+const isMonarchModel = (m: DnaModel | MonarchModel): m is MonarchModel =>
+  "totalEffectiveCost" in m;
+
+/** The model's own annual cost: Monarch's all-in effective cost, or DNA's TER. */
+const modelCostOf = (m: DnaModel | MonarchModel): number =>
+  isMonarchModel(m) ? m.totalEffectiveCost : m.ter;
+
+/** Per-percentile figures, keyed the same way across depletion/real/CAGR outputs. */
+interface ByPercentile<T> { p5: T; p50: T; p75: T; p95: T; linear: T }
+
+/** Guardrail diagnostics — only present when the guardrail rule is active. */
+interface GuardStats {
+  band: number;
+  avgFreezes: number;
+  avgFreezesOnSuccess: number;
+  pctSuccessNoGuard: number;
+  pctPathsEverFrozen: number;
+  freezeByYear: number[];
+  peakFreezeYear: number;
+}
+
+/** One metric card: label, value, sub-label, colour, depletion date, real value, CAGR. */
+type MetricCard = [string, string, string, string, string | null, number | null, number | null];
+
+/** Everything one simulation run produces, as consumed by the charts and cards. */
+interface SimResults {
+  p5: number; p50: number; p75: number; p95: number;
+  pctSuccess: number; pctBeat: number; pctRuined: number;
+  totalIn: number;
+  p5a: number[]; p50a: number[]; p75a: number[]; p95a: number[];
+  w5a: number[]; w50a: number[]; w75a: number[]; w95a: number[];
+  linPort: number[]; linW: number[];
+  dep: ByPercentile<string | null>;
+  real: ByPercentile<number>;
+  avgReturn: ByPercentile<number | null>;
+  labels: string[];
+  avgInc: string; avgSkip: string; finalContrib: number;
+  expectedBalance: number[];
+  guard: GuardStats | null;
+}
 
 const COLORS = { p95: "#8B5CF6", p90: "#378ADD", p50: "#1D9E75", p10: "#D85A30", linear: "#f59e0b" };
 
-function fmt(v) {
+function fmt(v: number) {
   if (v >= 1e6) return "R" + (v / 1e6).toFixed(2) + "M";
   if (v >= 1e3) return "R" + (v / 1e3).toFixed(0) + "k";
   return "R" + Math.round(v);
@@ -39,11 +96,11 @@ export default function App() {
   const otherFees = adviceFee + platformFee;
   const [modelRange, setModelRange]   = useState("dna");         // "dna" | "monarch" — which preset list is shown
   const [modelKey, setModelKey]       = useState("");            // selected model preset within modelRange ("" = custom)
-  const [lumps, setLumps]             = useState([]);
-  const [results, setResults]         = useState(null);
+  const [lumps, setLumps]             = useState<Lump[]>([]);
+  const [results, setResults]         = useState<SimResults | null>(null);
   const [chartReady, setChartReady]   = useState(false);
-  const c1Ref = useRef(null); const c1Inst = useRef(null);
-  const c2Ref = useRef(null); const c2Inst = useRef(null);
+  const c1Ref = useRef<HTMLCanvasElement | null>(null); const c1Inst = useRef<any>(null);
+  const c2Ref = useRef<HTMLCanvasElement | null>(null); const c2Inst = useRef<any>(null);
 
   useEffect(() => {
     const s = document.createElement("script");
@@ -159,10 +216,10 @@ export default function App() {
       return { final: val, path, wpath, freezeYears, skips, incs };
     };
 
-    const finals = [], paths = [], wpaths = [];
+    const finals: number[] = [], paths: number[][] = [], wpaths: number[][] = [];
     let totSkip = 0, totInc = 0;
     let totFreeze = 0, freezeOnSuccess = 0, successCount = 0, baseSuccess = 0, pathsFrozen = 0;
-    const freezeByYear = Array(years + 1).fill(0);
+    const freezeByYear: number[] = Array(years + 1).fill(0);
 
     for (let s = 0; s < N; s++) {
       // Generate raw monthly returns — each path draws independently, so results
@@ -187,7 +244,7 @@ export default function App() {
     }
 
     finals.sort((a, b) => a - b);
-    const pct = p => finals[Math.floor(p / 100 * N)];
+    const pct = (p: number) => finals[Math.floor(p / 100 * N)];
 
     const p5a = [], p50a = [], p75a = [], p95a = [];
     const w5a = [], w50a = [], w75a = [], w95a = [];
@@ -239,11 +296,11 @@ export default function App() {
     })();
 
     // Depletion month/year
-    const depletionYearIdx = arr => { for (let y = 0; y < arr.length; y++) { if (arr[y] <= 0) return y; } return null; };
+    const depletionYearIdx = (arr: number[]) => { for (let y = 0; y < arr.length; y++) { if (arr[y] <= 0) return y; } return null; };
     const now = new Date();
     const baseYear = now.getFullYear(), baseMonth = now.getMonth();
     const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-    const fmtDeplete = yr => {
+    const fmtDeplete = (yr: number | null) => {
       if (yr === null) return null;
       const tot = baseMonth + yr * 12;
       return monthNames[tot % 12] + " " + (baseYear + Math.floor(tot / 12));
@@ -267,7 +324,7 @@ export default function App() {
     };
 
     // Implied CAGR
-    const cagr = t => (init <= 0 || t <= 0 || years <= 0) ? null : (Math.pow(t / init, 1 / years) - 1) * 100;
+    const cagr = (t: number) => (init <= 0 || t <= 0 || years <= 0) ? null : (Math.pow(t / init, 1 / years) - 1) * 100;
     const avgReturn = {
       p5: cagr(pct(5)),
       p50: cagr(pct(50)),
@@ -308,7 +365,7 @@ export default function App() {
     if (c1Inst.current) c1Inst.current.destroy();
     const band = results.p75a.map((v, i) => ({ x: results.labels[i], y: [results.p5a[i], v] }));
     const annPlugin = {
-      id: "ann", afterDraw(ch) {
+      id: "ann", afterDraw(ch: any) {
         lumps.forEach(({ year, amount }) => {
           const { ctx: c, scales: { x, y } } = ch;
           const xp = x.getPixelForValue(year);
@@ -332,9 +389,9 @@ export default function App() {
         responsive: true, maintainAspectRatio: false, animation: { duration: 350 },
         scales: {
           x: { ticks: { color: "#999", font: { size: 10 }, autoSkip: true, maxTicksLimit: 10 }, grid: { color: "rgba(0,0,0,.05)" } },
-          y: { min: 0, ticks: { color: "#999", font: { size: 10 }, callback: v => fmt(v) }, grid: { color: "rgba(0,0,0,.05)" } }
+          y: { min: 0, ticks: { color: "#999", font: { size: 10 }, callback: (v: any) => fmt(v) }, grid: { color: "rgba(0,0,0,.05)" } }
         },
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => { const v = c.raw; return typeof v === "object" && Array.isArray(v.y) ? `Band: ${fmt(v.y[0])}–${fmt(v.y[1])}` : `${c.dataset.label}: ${fmt(v)}`; } } } }
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c: any) => { const v = c.raw; return typeof v === "object" && Array.isArray(v.y) ? `Band: ${fmt(v.y[0])}–${fmt(v.y[1])}` : `${c.dataset.label}: ${fmt(v)}`; } } } }
       }, plugins: [annPlugin]
     });
   }, [results, chartReady, lumps]);
@@ -357,14 +414,14 @@ export default function App() {
         responsive: true, maintainAspectRatio: false, animation: { duration: 350 },
         scales: {
           x: { ticks: { color: "#999", font: { size: 10 }, autoSkip: true, maxTicksLimit: 10 }, grid: { color: "rgba(0,0,0,.05)" } },
-          y: { min: 0, ticks: { color: "#999", font: { size: 10 }, callback: v => fmt(v) }, grid: { color: "rgba(0,0,0,.05)" } }
+          y: { min: 0, ticks: { color: "#999", font: { size: 10 }, callback: (v: any) => fmt(v) }, grid: { color: "rgba(0,0,0,.05)" } }
         },
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => { const v = c.raw; return typeof v === "object" && Array.isArray(v.y) ? `Band: ${fmt(v.y[0])}–${fmt(v.y[1])}` : `${c.dataset.label}: ${fmt(v)}`; } } } }
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c: any) => { const v = c.raw; return typeof v === "object" && Array.isArray(v.y) ? `Band: ${fmt(v.y[0])}–${fmt(v.y[1])}` : `${c.dataset.label}: ${fmt(v)}`; } } } }
       }
     });
   }, [results, chartReady, withdraw]);
 
-  const sRow = (label, min, max, step, val, set, disp, col) => (
+  const sRow = (label: string, min: number, max: number, step: number, val: number, set: (v: number) => void, disp: ReactNode, col?: string) => (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
         <span style={{ fontSize: 12, color: "#666" }}>{label}</span>
@@ -376,7 +433,7 @@ export default function App() {
   );
 
   // Exact-value number box (no slider), for fields advisors need to enter precisely (e.g. for a Record of Advice).
-  const sRowN = (label, min, max, step, val, set, prefix, col, suffix) => (
+  const sRowN = (label: string, min: number, max: number, step: number, val: number, set: (v: number) => void, prefix?: string, col?: string, suffix?: string) => (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>{label}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, border: "1px solid #ccc", borderRadius: 6, padding: "4px 8px", background: "#fff" }}>
@@ -390,7 +447,7 @@ export default function App() {
     </div>
   );
 
-  const segRow = (opts, val, set) => (
+  const segRow = (opts: [string, string][], val: string, set: (v: string) => void) => (
     <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #ddd", marginBottom: 10 }}>
       {opts.map(([k, lbl], i) => (
         <button key={k} onClick={() => set(k)} style={{
@@ -403,8 +460,8 @@ export default function App() {
   );
 
   const hr = <div style={{ borderTop: "1px solid #eee", margin: "10px 0 12px" }} />;
-  const secLabel = t => <div style={{ fontSize: 11, fontWeight: 700, color: "#aaa", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 8 }}>{t}</div>;
-  const legend = items => (
+  const secLabel = (t: string) => <div style={{ fontSize: 11, fontWeight: 700, color: "#aaa", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 8 }}>{t}</div>;
+  const legend = (items: [string, string, boolean][]) => (
     <div style={{ display: "flex", gap: 14, marginBottom: 8, fontSize: 11, color: "#888", flexWrap: "wrap" }}>
       {items.map(([c, l, d]) => (
         <span key={l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -509,14 +566,14 @@ export default function App() {
           {activeModel && (
             <div style={{ fontSize: 11, color: modelMatches ? "#1D9E75" : "#BA7517", marginTop: 4 }}>
               {modelMatches
-                ? (modelRange === "monarch"
+                ? (isMonarchModel(activeModel)
                     ? <>Linked to spreadsheet · CPI+{activeModel.cpiPlusTarget}% target · cost {activeModel.totalEffectiveCost}% · {activeModel.volPeriod} volatility{!activeModel.reg28 ? " · Reg 28: No" : ""}</>
                     : <>Linked to spreadsheet · CPI+{activeModel.cpiPlusTarget}% target · TER {activeModel.ter}% · {activeModel.volPeriod} volatility</>)
                 : <>Customised — differs from {activeModel.name.replace(/^(DNA|Monarch Integrate) /, "")}</>}
             </div>
           )}
           {activeModel && (() => {
-            const modelCost = modelRange === "monarch" ? activeModel.totalEffectiveCost : activeModel.ter;
+            const modelCost = modelCostOf(activeModel);
             const requiredGross = activeModel.nominalReturn + modelCost;
             return (
               <div style={{ fontSize: 11, color: "#666", marginTop: 3, background: "#f8f8f6", border: "1px solid #eee", borderRadius: 5, padding: "5px 7px" }}>
@@ -577,13 +634,13 @@ export default function App() {
 
         {/* Metric cards */}
         <div style={{ display: "flex", borderBottom: "1px solid #eee", flexWrap: "wrap" }}>
-          {[
+          {([
             ["Median (P50)",      results ? fmt(results.p50) : "—", "50th percentile", COLORS.p50,  results ? results.dep.p50 : null,    results ? results.real.p50 : null,    results ? results.avgReturn.p50 : null],
             ["Optimistic (P75)",  results ? fmt(results.p75) : "—", "75th percentile", COLORS.p90,  results ? results.dep.p75 : null,    results ? results.real.p75 : null,    results ? results.avgReturn.p75 : null],
             ["Best case (P95)",   results ? fmt(results.p95) : "—", "95th percentile", COLORS.p95,  results ? results.dep.p95 : null,    results ? results.real.p95 : null,    results ? results.avgReturn.p95 : null],
             ["Conservative (P5)", results ? fmt(results.p5) : "—",  "5th percentile",  COLORS.p10,  results ? results.dep.p5 : null,     results ? results.real.p5 : null,     results ? results.avgReturn.p5 : null],
             ["Fixed-return projection", results ? fmt(results.linPort ? results.linPort[results.linPort.length - 1] : 0) : "—", "same return every year, no ups and downs", COLORS.linear, results ? results.dep.linear : null, results ? results.real.linear : null, results ? results.avgReturn.linear : null],
-          ].map(([label, value, sub, color, depleteAt, realVal, cagr]) => (
+          ] as MetricCard[]).map(([label, value, sub, color, depleteAt, realVal, cagr]) => (
             <div key={label} style={{ flex: 1, minWidth: 80, padding: "10px 12px", borderRight: "1px solid #eee" }}>
               <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>{label}</div>
               <div style={{ fontSize: 17, fontWeight: 600, color: color || "#111" }}>{value}</div>
@@ -617,7 +674,7 @@ export default function App() {
         {results && results.guard && (() => {
           const g = results.guard;
           const lift = results.pctSuccess - g.pctSuccessNoGuard;
-          const cell = (label, value, color, sub) => (
+          const cell = (label: string, value: string, color: string, sub?: string) => (
             <div style={{ flex: 1, minWidth: 110, padding: "8px 12px", borderRight: "1px solid #eee" }}>
               <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>{label}</div>
               <div style={{ fontSize: 16, fontWeight: 600, color }}>{value}</div>
