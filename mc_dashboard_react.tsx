@@ -39,6 +39,48 @@ interface GuardStats {
   peakFreezeYear: number;
 }
 
+/**
+ * Sandidge's "vital signs" for one path at one year end. All are cumulative rather than
+ * point-in-time, which is what lets them measure built-up momentum — the thing a
+ * single-year rule like the guardrail cannot see.
+ */
+interface VitalSigns {
+  yr: number;
+  negYears: number;    // years with a negative market return, cumulative
+  bigLosses: number;   // years with a loss of 5% or worse, cumulative
+  overdrawn: number;   // years where withdrawal + fees exceeded the return, cumulative
+  ncav: number;        // years the account value fell, cumulative
+  moro: number;        // momentum ratio %: negative account-value changes / positive
+  aer: number;         // annualised erosion rate, as a fraction
+  distRate: number;    // current withdrawal as % of balance
+  sd: number;          // semi-deviation of returns below zero, %
+  scav: number;        // semi-deviation of account-value changes below zero, %
+}
+
+/** One row of the year-N diagnostic: the reading, its target, and its failure rate. */
+interface HealthRow {
+  key: string;
+  label: string;
+  goal: string;
+  value: string;
+  failRate: number | null;
+  ok: boolean;
+}
+
+/**
+ * Portfolio-health diagnostic derived from the simulated paths. Everything is precomputed
+ * for every year so the year selector is a pure display control — moving it must not
+ * trigger another simulation run.
+ */
+interface HealthStats {
+  rowsByYear: HealthRow[][];        // indexed by year; [0] is empty
+  afrByYear: (number | null)[];     // average failure rate for the median path, 0-1
+  moroByYear: number[];             // momentum ratio % for the median path
+  afrSurvived: (number | null)[];   // mean AFR by year, paths that survived
+  afrDepleted: (number | null)[];   // mean AFR by year, paths that depleted
+  maxYear: number;
+}
+
 /** One metric card: label, value, sub-label, colour, depletion date, real value, CAGR. */
 type MetricCard = [string, string, string, string, string | null, number | null, number | null];
 
@@ -57,6 +99,7 @@ interface SimResults {
   avgInc: string; avgSkip: string; finalContrib: number;
   expectedBalance: number[];
   guard: GuardStats | null;
+  health: HealthStats | null;
 }
 
 const COLORS = { p95: "#8B5CF6", p90: "#378ADD", p50: "#1D9E75", p10: "#D85A30", linear: "#f59e0b" };
@@ -86,6 +129,7 @@ export default function App() {
   const [skipMode, setSkipMode]       = useState("none");
   const [skipEvery, setSkipEvery]     = useState(3);
   const [guardBand, setGuardBand]     = useState(90);           // % of the expected-balance trajectory below which the guardrail arms
+  const [healthYear, setHealthYear]   = useState(5);            // year the health diagnostic reports on (Sandidge's worked example is year 5)
   const [ret, setRet]                 = useState(8);
   const [vol, setVol]                 = useState(15);
   const [years, setYears]             = useState(20);
@@ -172,29 +216,53 @@ export default function App() {
 
     // Run one path's returns under a chosen escalation policy.
     // useGuard=false with skipMode "guard" gives the no-guardrail baseline for comparison.
-    const runOnePath = (monthlyReturns: number[], useGuard: boolean) => {
+    // trackSigns records Sandidge's vital signs at each year end for the health diagnostic.
+    const runOnePath = (monthlyReturns: number[], useGuard: boolean, trackSigns = false) => {
       let val = init, curW = withdraw, curC = contrib, yrStart = init;
       const path = [val], wpath = [curW];
       const freezeYears = [];
       let skips = 0, incs = 0;
 
+      // Running vital-sign accumulators (all cumulative — that is the point of momentum).
+      let negYears = 0, bigLosses = 0, overdrawn = 0, ncav = 0;
+      let sumNegCav = 0, sumPosCav = 0, sumSqNegRet = 0, sumSqNegCav = 0;
+      const signs: VitalSigns[] = [];
+
       for (let m = 0; m < months; m++) {
         if (m > 0 && m % 12 === 0) {
           const yr = m / 12;   // year `yr` just completed; val = balance at end of that year
+
+          // That year's market return, compounded from its 12 monthly draws. This is the
+          // market's return, deliberately not the change in account value — withdrawals
+          // would otherwise make a positive-return year read as negative.
+          let g = 1;
+          for (let k = (yr - 1) * 12; k < yr * 12; k++) g *= (1 + monthlyReturns[k]);
+          const yearReturn = g - 1;
+          const belowTrajectory = val < bandFrac * expectedBalance[yr];
+
+          if (trackSigns) {
+            const cav = yrStart > 0 ? (val - yrStart) / yrStart : 0;
+            if (yearReturn < 0) { negYears++; sumSqNegRet += yearReturn * yearReturn; }
+            if (yearReturn <= -0.05) bigLosses++;
+            if (cav < 0) { ncav++; sumNegCav += -cav; sumSqNegCav += cav * cav; } else sumPosCav += cav;
+            const distRate = val > 0 ? (curW * 12) / val * 100 : Infinity;
+            if (distRate / 100 + otherFees / 100 > yearReturn) overdrawn++;
+            signs.push({
+              yr, negYears, bigLosses, overdrawn, ncav,
+              moro: sumPosCav > 0 ? (sumNegCav / sumPosCav) * 100 : (sumNegCav > 0 ? 999 : 0),
+              aer: Math.pow(Math.max(val, 1) / init, 1 / yr) - 1,
+              distRate,
+              sd: Math.sqrt(sumSqNegRet / yr) * 100,
+              scav: Math.sqrt(sumSqNegCav / yr) * 100,
+            });
+          }
+
           if (wEsc > 0) {
             let skip;
             if (skipMode === "guard") {
-              if (useGuard) {
-                // Compound the 12 months of year `yr` to get that year's market return.
-                let g = 1;
-                for (let k = (yr - 1) * 12; k < yr * 12; k++) g *= (1 + monthlyReturns[k]);
-                const belowTrajectory = val < bandFrac * expectedBalance[yr];
-                const negativeYear = (g - 1) < 0;
-                skip = belowTrajectory && negativeYear;   // BOTH must hold
-                if (skip) freezeYears.push(yr);
-              } else {
-                skip = false;                              // baseline: always escalate
-              }
+              // Freeze only when BOTH hold; useGuard=false is the no-rule baseline.
+              skip = useGuard && belowTrajectory && yearReturn < 0;
+              if (skip) freezeYears.push(yr);
             } else {
               const neg = yrStart > 0 && (val - yrStart) / yrStart < 0;
               skip = skipMode === "negative" ? neg : skipMode === "fixed" ? (yr % skipEvery === 0) : false;
@@ -213,7 +281,7 @@ export default function App() {
         if (val < 0) val = 0;
         if ((m + 1) % 12 === 0) path.push(val);
       }
-      return { final: val, path, wpath, freezeYears, skips, incs };
+      return { final: val, path, wpath, freezeYears, skips, incs, signs };
     };
 
     const finals: number[] = [], paths: number[][] = [], wpaths: number[][] = [];
@@ -221,13 +289,18 @@ export default function App() {
     let totFreeze = 0, freezeOnSuccess = 0, successCount = 0, baseSuccess = 0, pathsFrozen = 0;
     const freezeByYear: number[] = Array(years + 1).fill(0);
 
+    // Health diagnostic only means anything once money is coming out.
+    const healthOn = withdraw > 0;
+    const allSigns: VitalSigns[][] = [];
+
     for (let s = 0; s < N; s++) {
       // Generate raw monthly returns — each path draws independently, so results
       // carry both mean uncertainty and sequence-of-returns risk.
       const monthlyReturns = Array.from({ length: months }, () => muM + sigM * randn());
 
-      const r = runOnePath(monthlyReturns, true);
+      const r = runOnePath(monthlyReturns, true, healthOn);
       totSkip += r.skips; totInc += r.incs;
+      if (healthOn) allSigns.push(r.signs);
 
       if (guardOn) {
         // Same return sequence, no guardrail — a paired comparison, so any difference in
@@ -242,6 +315,150 @@ export default function App() {
 
       finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath);
     }
+
+    // ---- Portfolio health (Sandidge's vital signs) ----
+    // Failure rates are calibrated from THIS run rather than his historical database, so the
+    // odds quoted reflect the assumptions actually on screen. Must run before finals is
+    // sorted below, since the ordering is what ties a path to its recorded signs.
+    const health: HealthStats | null = (() => {
+      if (!healthOn || !allSigns.length) return null;
+
+      // Sandidge counts a portfolio as failed at under 40% of starting principal, which
+      // catches plans that limp to the finish as well as those that hit zero.
+      const failed = finals.map(f => f <= 0.40 * init);
+
+      const bucket: Record<string, (v: number) => number> = {
+        negYears:  v => Math.min(Math.round(v), 20),
+        bigLosses: v => Math.min(Math.round(v), 10),
+        overdrawn: v => Math.min(Math.round(v), 25),
+        ncav:      v => Math.min(Math.round(v), 25),
+        moro:      v => Math.min(Math.round(v / 25), 20),
+        aer:       v => Math.max(-10, Math.min(10, Math.round(v * 100))),
+        distRate:  v => Math.min(40, Math.round(v * 2)),
+        sd:        v => Math.min(20, Math.round(v * 2)),
+        scav:      v => Math.min(20, Math.round(v * 2)),
+      };
+      const SIG_KEYS = Object.keys(bucket);
+
+      // tally[key][yr][bucket] = [failures, total]
+      const tally: Record<string, Record<number, Record<number, [number, number]>>> = {};
+      SIG_KEYS.forEach(k => { tally[k] = {}; });
+      allSigns.forEach((signs, i) => {
+        const isFail = failed[i];
+        signs.forEach(s => {
+          SIG_KEYS.forEach(k => {
+            const b = bucket[k]((s as any)[k]);
+            (tally[k][s.yr] ??= {})[b] ??= [0, 0];
+            tally[k][s.yr][b][1]++;
+            if (isFail) tally[k][s.yr][b][0]++;
+          });
+        });
+      });
+
+      // Thin buckets are noise, so report no reading rather than a made-up odds figure.
+      const rateOf = (k: string, yr: number, v: number): number | null => {
+        const cell = tally[k]?.[yr]?.[bucket[k](v)];
+        return cell && cell[1] >= 25 ? cell[0] / cell[1] : null;
+      };
+
+      // Sandidge publishes a target per sign per year; his tables are proprietary, so derive
+      // the equivalent from this run — the reading at which the odds of failing pass 50%.
+      // Targets must be year-specific: five negative years is alarming by year 5 and
+      // unremarkable by year 25, so a fixed target would flag healthy plans as failing.
+      const unbucket: Record<string, (b: number) => number> = {
+        negYears: b => b, bigLosses: b => b, overdrawn: b => b, ncav: b => b,
+        moro: b => b * 25, aer: b => b, distRate: b => b / 2, sd: b => b / 2, scav: b => b / 2,
+      };
+      const worseWhenHigher: Record<string, boolean> = {
+        negYears: true, bigLosses: true, overdrawn: true, ncav: true,
+        moro: true, distRate: true, sd: true, scav: true,
+        aer: false,   // a low erosion rate is the danger signal
+      };
+      const thresholdOf = (k: string, yr: number): number | null => {
+        const byBucket = tally[k]?.[yr];
+        if (!byBucket) return null;
+        const bs = Object.keys(byBucket).map(Number).sort((a, b) => a - b);
+        const usable = bs.filter(b => byBucket[b][1] >= 25);
+        if (!usable.length) return null;
+        const ordered = worseWhenHigher[k] ? usable : usable.slice().reverse();
+        for (const b of ordered) {
+          const [f, n] = byBucket[b];
+          if (f / n >= 0.5) return unbucket[k](b);
+        }
+        return null;   // nothing in range is bad enough to reach even odds
+      };
+      const afrOf = (s: VitalSigns): number | null => {
+        const rs = SIG_KEYS.map(k => rateOf(k, s.yr, (s as any)[k])).filter((r): r is number => r !== null);
+        return rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null;
+      };
+
+      // Sandidge's figure 8: mean health by year, surviving vs depleted, so the divergence
+      // between the two groups is visible rather than asserted.
+      const sumS = Array(years + 1).fill(0), cntS = Array(years + 1).fill(0);
+      const sumD = Array(years + 1).fill(0), cntD = Array(years + 1).fill(0);
+      allSigns.forEach((signs, i) => {
+        const dead = failed[i];
+        signs.forEach(s => {
+          const a = afrOf(s);
+          if (a === null) return;
+          if (dead) { sumD[s.yr] += a; cntD[s.yr]++; } else { sumS[s.yr] += a; cntS[s.yr]++; }
+        });
+      });
+      const mean = (sum: number[], cnt: number[]) => sum.map((v, i) => cnt[i] ? v / cnt[i] : null);
+
+      // Report on the median outcome — the representative case for a client conversation.
+      const order = finals.map((f, i) => [f, i] as [number, number]).sort((a, b) => a[0] - b[0]);
+      const medianSigns = allSigns[order[Math.floor(0.50 * N)][1]] ?? [];
+
+      // Precompute every year so the year selector never re-runs the simulation.
+      const rowsByYear: HealthRow[][] = [[]];
+      const afrByYear: (number | null)[] = [null];
+      const moroByYear: number[] = [0];
+      // key, label, reading, how to display a threshold
+      const SPEC: [string, string, (s: VitalSigns) => number, (t: number) => string][] = [
+        ["negYears",  "Negative years",      s => s.negYears,    t => String(Math.round(t))],
+        ["bigLosses", "Losses of 5%+",       s => s.bigLosses,   t => String(Math.round(t))],
+        ["sd",        "Downside spread",     s => s.sd,          t => t.toFixed(1) + "%"],
+        ["aer",       "Erosion rate",        s => s.aer * 100,   t => t.toFixed(0) + "%"],
+        ["distRate",  "Withdrawal rate",     s => s.distRate,    t => t.toFixed(1) + "%"],
+        ["overdrawn", "Overdrawn years",     s => s.overdrawn,   t => String(Math.round(t))],
+        ["moro",      "Momentum (MoRo)",     s => s.moro,        t => Math.round(t) + "%"],
+        ["ncav",      "Years value fell",    s => s.ncav,        t => String(Math.round(t))],
+        ["scav",      "Value-change spread", s => s.scav,        t => t.toFixed(1) + "%"],
+      ];
+      const fmtVal: Record<string, (v: number) => string> = {
+        negYears: v => String(v), bigLosses: v => String(v), overdrawn: v => String(v), ncav: v => String(v),
+        moro: v => Math.round(v) + "%", aer: v => v.toFixed(1) + "%",
+        distRate: v => v.toFixed(1) + "%", sd: v => v.toFixed(1) + "%", scav: v => v.toFixed(1) + "%",
+      };
+
+      for (let y = 1; y <= years; y++) {
+        const s = medianSigns.find(x => x.yr === y);
+        if (!s) { rowsByYear[y] = []; afrByYear[y] = null; moroByYear[y] = 0; continue; }
+        rowsByYear[y] = SPEC.map(([key, label, read, fmtT]) => {
+          const raw = read(s);
+          const thr = thresholdOf(key, y);
+          const higherWorse = worseWhenHigher[key];
+          const ok = thr === null ? true : (higherWorse ? raw < thr : raw > thr);
+          return {
+            key, label,
+            goal: thr === null ? "—" : (higherWorse ? "< " : "> ") + fmtT(thr),
+            value: fmtVal[key](raw),
+            failRate: rateOf(key, y, key === "aer" ? s.aer : raw),
+            ok,
+          };
+        });
+        afrByYear[y] = afrOf(s);
+        moroByYear[y] = s.moro;
+      }
+
+      return {
+        rowsByYear, afrByYear, moroByYear,
+        afrSurvived: mean(sumS, cntS),
+        afrDepleted: mean(sumD, cntD),
+        maxYear: years,
+      };
+    })();
 
     finals.sort((a, b) => a - b);
     const pct = (p: number) => finals[Math.floor(p / 100 * N)];
@@ -354,7 +571,10 @@ export default function App() {
         freezeByYear,
         peakFreezeYear: freezeByYear.reduce((bi, v, i, a) => v > a[bi] ? i : bi, 0),
       } : null,
+      health,
     });
+    // healthYear is deliberately NOT a dependency — it only picks which precomputed year
+    // the diagnostic displays, so moving it must not trigger another simulation run.
   }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
@@ -693,6 +913,88 @@ export default function App() {
                 {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
                 {cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
                 {cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Portfolio health — Sandidge's vital signs on the median path */}
+        {results && results.health && (() => {
+          const h = results.health;
+          const yr = Math.min(Math.max(healthYear, 1), h.maxYear);
+          const rows = h.rowsByYear[yr] ?? [];
+          const moro = h.moroByYear[yr] ?? 0;
+          const afrRaw = h.afrByYear[yr] ?? null;
+          const afrPct = afrRaw === null ? null : Math.round(afrRaw * 100);
+          // Sandidge's bands: under 50% tilts the odds your way, 60%+ against.
+          const afrColor = afrPct === null ? "#888" : afrPct < 50 ? "#1D9E75" : afrPct < 60 ? "#BA7517" : "#D85A30";
+          const afrWord  = afrPct === null ? "no reading" : afrPct < 50 ? "Healthy" : afrPct < 60 ? "Fragile" : "At risk";
+          const moroColor = moro < 100 ? "#1D9E75" : moro < 200 ? "#BA7517" : "#D85A30";
+          const r = 26, circ = 2 * Math.PI * r;
+          return (
+            <div style={{ borderTop: "1px solid #eee", background: "#fdfdfb" }}>
+              <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
+                Portfolio health · median outcome, year {yr}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · early warning signs of a plan losing ground</span>
+              </div>
+
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4, padding: "8px 16px 4px" }}>
+                {/* Overall health score */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 18 }}>
+                  <svg width={64} height={64} viewBox="0 0 64 64">
+                    <circle cx={32} cy={32} r={r} fill="none" stroke="#eee" strokeWidth={7} />
+                    <circle cx={32} cy={32} r={r} fill="none" stroke={afrColor} strokeWidth={7}
+                      strokeDasharray={`${circ * (afrPct ?? 0) / 100} ${circ}`} strokeLinecap="round" transform="rotate(-90 32 32)" />
+                    <text x={32} y={36} textAnchor="middle" fontSize={12} fontWeight={600} fill={afrColor}>{afrPct === null ? "—" : afrPct + "%"}</text>
+                  </svg>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: afrColor }}>{afrWord}</div>
+                    <div style={{ fontSize: 11, color: "#aaa" }}>health score</div>
+                    <div style={{ fontSize: 10, color: "#bbb" }}>aim under 50%</div>
+                  </div>
+                </div>
+                {/* Momentum ratio — Sandidge's own momentum measure */}
+                <div style={{ paddingRight: 18, borderLeft: "1px solid #eee", paddingLeft: 18 }}>
+                  <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Momentum (MoRo)</div>
+                  <div style={{ fontSize: 17, fontWeight: 600, color: moroColor }}>{Math.round(moro)}%</div>
+                  <div style={{ fontSize: 11, color: "#bbb" }}>aim under 100%</div>
+                  <div style={{ fontSize: 10, color: "#bbb" }}>falls ÷ rises in value</div>
+                </div>
+                {/* Year selector */}
+                <div style={{ flex: 1, minWidth: 150, borderLeft: "1px solid #eee", paddingLeft: 18 }}>
+                  {sRow("Report on year", 1, Math.max(1, h.maxYear), 1, healthYear, setHealthYear, "Yr " + yr, "#185FA5")}
+                </div>
+              </div>
+
+              {/* Per-signal diagnostic */}
+              <div style={{ padding: "0 16px 12px", overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%", minWidth: 420 }}>
+                  <thead>
+                    <tr style={{ color: "#999" }}>
+                      <th style={{ textAlign: "left",  fontWeight: 500, padding: "3px 8px 3px 0" }}>Warning sign</th>
+                      <th style={{ textAlign: "right", fontWeight: 500, padding: "3px 8px" }}>Aim for</th>
+                      <th style={{ textAlign: "right", fontWeight: 500, padding: "3px 8px" }}>This plan</th>
+                      <th style={{ textAlign: "right", fontWeight: 500, padding: "3px 0 3px 8px" }}>Plans like this failed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(row => {
+                      const fr = row.failRate === null ? null : Math.round(row.failRate * 100);
+                      const frColor = fr === null ? "#bbb" : fr < 50 ? "#1D9E75" : fr < 60 ? "#BA7517" : "#D85A30";
+                      return (
+                        <tr key={row.key} style={{ borderTop: "1px solid #f0f0f0" }}>
+                          <td style={{ padding: "4px 8px 4px 0", color: "#555" }}>{row.label}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right", color: "#aaa" }}>{row.goal}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 600, color: row.ok ? "#1D9E75" : "#D85A30" }}>{row.value}</td>
+                          <td style={{ padding: "4px 0 4px 8px", textAlign: "right", fontWeight: 600, color: frColor }}>{fr === null ? "—" : fr + "%"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 10, color: "#bbb", marginTop: 6 }}>
+                  "Plans like this failed" is measured from this run: of the simulated plans that reached year {yr} with the same reading, the share that ended below 40% of their starting value. The health score averages those odds across the signs. "Aim for" is the reading at which those odds pass 50%, worked out separately for each year — five negative years means something different by year 25 than by year 5.
+                </div>
               </div>
             </div>
           );

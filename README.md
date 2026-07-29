@@ -26,6 +26,22 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   the reported improvement is a like-for-like comparison rather than two independent draws.
 - **Capital injections** — one-off lump sums added in a specific year (multiple supported).
 - **Market assumptions** — expected annual return and annual volatility (σ), used to draw normally-distributed monthly returns (Box-Muller `randn()`).
+- **Portfolio health diagnostic** (shown once there are withdrawals) — the "vital signs" from
+  Sandidge's *Linear Thinking in a Nonlinear Retirement-Income World*, read off the median
+  simulated path for any chosen year. Two headline figures: a **health score** (his Average
+  Failure Rate, aim under 50%) and **MoRo**, his momentum ratio of falls to rises in account
+  value (aim under 100%). Beneath them, nine warning signs with the reading, its target, and
+  the share of comparable plans that failed.
+
+  Failure rates are calibrated from the current run rather than his proprietary tables, so the
+  odds reflect the assumptions on screen. Targets are derived **per year** — the reading at
+  which those odds pass 50% — because a fixed target would flag healthy plans as failing
+  (five negative years is alarming by year 5 and unremarkable by year 25). Note the calibrated
+  MoRo threshold independently lands on his published 100%.
+
+  This catches what the guardrail cannot: the guardrail only ever inspects the current year,
+  while these signs are cumulative and so measure built-up momentum. A stressed plan reads
+  "at risk" by year 3, well before the balance looks obviously damaged.
 - **Inflation-adjusted ("real") results** alongside nominal.
 - **Implied CAGR** for each percentile outcome and the fixed-return projection.
 - **Depletion date estimate** — first calendar month/year a percentile path hits zero.
