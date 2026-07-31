@@ -171,6 +171,10 @@ export default function App() {
   // Retirement pivot. 0 keeps the original single-phase behaviour, where contributions and
   // withdrawals both run from the start; above 0 the plan contributes until that year and
   // draws afterwards, so one run can span working life and retirement.
+  // What the plan covers. Previously implied by whether contributions, withdrawals and a
+  // retirement date happened to be set; making it explicit means the sidebar can show only
+  // the inputs that apply, and the engine is fed a consistent set rather than a leftover one.
+  const [planMode, setPlanMode]         = useState("post");     // "pre" | "post" | "both"
   const [retireDate, setRetireDate]     = useState("");         // "YYYY-MM"; blank = already drawing
   const [wBasis, setWBasis]             = useState("today");    // "today" | "atRet" | "percent"
   const [wPct, setWPct]                 = useState(4);          // % of the retirement balance drawn each year
@@ -212,6 +216,13 @@ export default function App() {
     return Math.max(0, (ry - now.getFullYear()) * 12 + (rm - 1 - now.getMonth()));
   })();
   const retireIn = retireMonths / 12;                 // years, may be fractional
+
+  // What the engine actually receives, per mode. A pre-retirement plan never draws; a
+  // post-retirement one never contributes and has no pivot; only a combined plan has both.
+  // Deriving these once means an input left over from another mode cannot quietly apply.
+  const effContrib       = planMode === "post" ? 0 : contrib;
+  const effWithdrawInput = planMode === "pre"  ? 0 : withdraw;
+  const effRetireMonths  = planMode === "both" ? retireMonths : 0;
   const retireLabel = (() => {
     if (!retireMonths) return "Already drawing";
     const y = Math.floor(retireMonths / 12), m = retireMonths % 12;
@@ -317,6 +328,12 @@ export default function App() {
     && inflation === INFLATION_ASSUMPTION;
 
   const runSim = useCallback(() => {
+    // Bind the mode-adjusted inputs to the names the engine below already uses, so every
+    // calculation sees the same set and no stale input from another mode can leak in.
+    const contrib = effContrib;
+    const withdraw = effWithdrawInput;
+    const retireMonths = effRetireMonths;
+
     const months = years * 12;
     const netRet = ret - otherFees; // other fees (advice/platform/etc.) reduce the return actually earned
     const muM = netRet / 100 / 12;
@@ -896,7 +913,7 @@ export default function App() {
     });
     // healthYear is deliberately NOT a dependency — it only picks which precomputed year
     // the diagnostic displays, so moving it must not trigger another simulation run.
-  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, retireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
+  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, planMode, effContrib, effWithdrawInput, effRetireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
@@ -1073,13 +1090,36 @@ export default function App() {
       <div style={{ width: 256, minWidth: 256, background: "#f8f8f6", borderRight: "1px solid #e0e0e0", padding: "14px 13px", overflowY: "auto", maxHeight: "90vh", flexShrink: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#333", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #e0e0e0" }}>⚙ Parameters</div>
 
+        {/* What the plan covers. Drives which inputs below apply and which are hidden. */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 6, textTransform: "uppercase", letterSpacing: ".06em" }}>Plan covers</div>
+          <div style={{ display: "flex", borderRadius: 8, overflow: "hidden", border: "2px solid #185FA5" }}>
+            {[["pre", "Saving", "Building up"], ["post", "Drawing", "Already retired"], ["both", "Both", "Through retirement"]].map(([k, lbl, desc], i) => (
+              <button key={k} onClick={() => setPlanMode(k)} style={{
+                flex: 1, padding: "7px 3px", cursor: "pointer", border: "none",
+                borderRight: i < 2 ? "2px solid #185FA5" : "none",
+                background: planMode === k ? "#185FA5" : "#fff",
+                color: planMode === k ? "#fff" : "#555",
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 700 }}>{lbl}</div>
+                <div style={{ fontSize: 9, opacity: .8, marginTop: 2 }}>{desc}</div>
+              </button>
+            ))}
+          </div>
+          {planMode === "both" && !retireDate && (
+            <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "6px 8px", marginTop: 8 }}>
+              Set a retirement date below, otherwise this behaves as a drawing-only plan.
+            </div>
+          )}
+        </div>
+
         {secLabel("Portfolio")}
         {sRowN("Starting value (R)", 100000, 200000000, 100000, init, setInit, "R")}
-        {sRowN("Monthly contribution (R)", 0, 100000, 500, contrib, setContrib, "R")}
-        {sRow("Contribution escalation (%/yr)", 0, 20, 0.5, contribEsc, setContribEsc, contribEsc === 0 ? "None" : contribEsc.toFixed(1) + "%/yr", contribEsc > 0 ? "#1D9E75" : undefined)}
+        {planMode !== "post" && sRowN("Monthly contribution (R)", 0, 100000, 500, contrib, setContrib, "R")}
+        {planMode !== "post" && sRow("Contribution escalation (%/yr)", 0, 20, 0.5, contribEsc, setContribEsc, contribEsc === 0 ? "None" : contribEsc.toFixed(1) + "%/yr", contribEsc > 0 ? "#1D9E75" : undefined)}
         {contribEsc > 0 && results && <div style={{ fontSize: 11, color: "#1D9E75", marginTop: -8, marginBottom: 10 }}>Yr {years} contribution: {fmt(results.finalContrib)}/mo</div>}
         {/* Only a saving plan has a target to fund; a drawdown plan is judged on lasting instead. */}
-        {withdraw === 0 && (
+        {planMode === "pre" && (
           <>
             {sRowN("Savings goal (R, 0 = none)", 0, 500000000, 100000, savingsTarget, setSavingsTarget, "R", savingsTarget > 0 ? "#185FA5" : undefined)}
             {savingsTarget > 0 && results && results.funding && results.funding.probTarget !== null && (
@@ -1090,25 +1130,24 @@ export default function App() {
           </>
         )}
 
-        {hr}
-        {secLabel("Withdrawal")}
-        {/* Retirement date. Blank means the plan is drawing now, which is how it behaved
-            before this existed; a future date makes it contribute first and draw afterwards. */}
-        <div style={{ marginBottom: 12 }}>
+        {planMode !== "pre" && hr}
+        {planMode !== "pre" && secLabel(planMode === "both" ? "Retirement income" : "Withdrawal")}
+        {/* The retirement date only means anything for a plan that spans both phases. */}
+        {planMode === "both" && <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>Retirement date</div>
           <input type="month" value={retireDate} onChange={e => setRetireDate(e.target.value)}
             style={{ width: "100%", padding: "5px 8px", fontSize: 12, fontWeight: 600, borderRadius: 6, border: "1px solid #ccc", background: "#fff", color: retireMonths > 0 ? "#185FA5" : "#888" }} />
           <div style={{ fontSize: 11, color: retireMonths > 0 ? "#185FA5" : "#aaa", marginTop: 3 }}>
             {retireLabel}{retireDate && retireMonths === 0 ? " — date is not in the future" : ""}
           </div>
-        </div>
-        {retireMonths > 0 && (
+        </div>}
+        {effRetireMonths > 0 && planMode === "both" && (
           <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
             Contributions run to that date, then stop and income starts, leaving {Math.max(0, years - Math.round(retireMonths / 12))} yrs of drawdown within the {years}-yr horizon.
             {retireMonths / 12 >= years && <> <strong>The date falls outside the horizon</strong> — lengthen it to see any drawdown.</>}
           </div>
         )}
-        {retireMonths > 0 && (
+        {effRetireMonths > 0 && (
           <>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Income is set as</div>
             <select value={wBasis} onChange={e => setWBasis(e.target.value)}
@@ -1119,18 +1158,18 @@ export default function App() {
             </select>
           </>
         )}
-        {retireMonths > 0 && wBasis === "percent"
+        {planMode !== "pre" && (effRetireMonths > 0 && wBasis === "percent"
           ? sRow("Draw at retirement (%/yr)", 1, 12, 0.25, wPct, setWPct, wPct.toFixed(2) + "% of balance", "#D85A30")
-          : sRowN(retireMonths === 0 ? "Monthly withdrawal (R)"
+          : sRowN(effRetireMonths === 0 ? "Monthly withdrawal (R)"
                   : wBasis === "atRet" ? "Monthly income at retirement (R)"
                   : "Monthly income wanted (R, today's money)",
-                  0, 500000, 1000, withdraw, setWithdraw, "R", withdraw > 0 ? "#D85A30" : undefined)}
-        {retireMonths > 0 && wBasis === "today" && withdraw > 0 && (
+                  0, 500000, 1000, withdraw, setWithdraw, "R", withdraw > 0 ? "#D85A30" : undefined))}
+        {effRetireMonths > 0 && wBasis === "today" && withdraw > 0 && (
           <div style={{ fontSize: 11, color: "#888", marginTop: -8, marginBottom: 10 }}>
             Carried forward by inflation, that is <strong style={{ color: "#D85A30" }}>{fmt(withdraw * Math.pow(1 + inflation / 100, retireMonths / 12))}</strong>/mo on the retirement date
           </div>
         )}
-        {retireMonths > 0 && wBasis === "atRet" && withdraw > 0 && (
+        {effRetireMonths > 0 && wBasis === "atRet" && withdraw > 0 && (
           <div style={{ fontSize: 11, color: "#888", marginTop: -8, marginBottom: 10 }}>
             Taken as entered, so in today's money that is <strong style={{ color: "#D85A30" }}>{fmt(withdraw / Math.pow(1 + inflation / 100, retireMonths / 12))}</strong>/mo
           </div>
@@ -1145,11 +1184,11 @@ export default function App() {
           </div>
         )}
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Annual withdrawal escalation</div>
-        {segRow([["none", "None"], ["custom", "Custom %"]], escMode, setEscMode)}
-        {escMode === "custom" && sRow("Escalation rate (%)", 0, 20, .5, customEsc, setCustomEsc, customEsc.toFixed(1) + "%", "#D85A30")}
+        {planMode !== "pre" && <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Annual withdrawal escalation</div>}
+        {planMode !== "pre" && segRow([["none", "None"], ["custom", "Custom %"]], escMode, setEscMode)}
+        {planMode !== "pre" && escMode === "custom" && sRow("Escalation rate (%)", 0, 20, .5, customEsc, setCustomEsc, customEsc.toFixed(1) + "%", "#D85A30")}
 
-        {escMode !== "none" && (
+        {planMode !== "pre" && escMode !== "none" && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Skip escalation when</div>
             <select value={skipMode} onChange={e => setSkipMode(e.target.value)}
