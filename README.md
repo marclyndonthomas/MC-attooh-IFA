@@ -14,6 +14,19 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   fixed to isolate sequence risk; this attooh IFA variant deliberately leaves it out so there is one consistent
   basis for every projection shown to a client. The label is worded for advisers explaining the chart to
   clients, not in statistical terms.)
+- **One run from working life through retirement.** Set a retirement date and the plan
+  contributes until then, stops, and draws afterwards — so accumulation and drawdown are a
+  single simulation rather than two. Leave the date blank and it behaves as it always did,
+  drawing from the start. The pivot is month-granular, and the simulated paths, the guardrail's
+  trajectory, the fixed-return line and the income line all switch phase at the same month.
+
+  Retirement income can be set three ways: an amount in **today's money** (carried forward by
+  inflation), an amount **at the retirement date** (used exactly as entered), or a **% of the
+  balance** that path actually reached. The first two put the same demand on every path
+  regardless of how the saving phase went, which is what makes the success rate meaningful; the
+  third adapts to the balance. An "At retirement" panel reports the balance handed over.
+
+  Horizon runs to 70 years to fit both phases.
 - **Contributions** with optional annual escalation (%/yr).
 - **Withdrawals** with optional annual escalation, and rules to *skip* an escalation in a given year:
   - never, only in years with a negative portfolio return, on a fixed cadence (e.g. every 3rd year),
@@ -52,6 +65,23 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   This catches what the guardrail cannot: the guardrail only ever inspects the current year,
   while these signs are cumulative and so measure built-up momentum. A stressed plan reads
   "at risk" by year 3, well before the balance looks obviously damaged.
+- **Funding position** (shown for saving plans, i.e. no withdrawal) — the accumulation
+  counterpart to the health diagnostic: funding ratio (median ÷ the fixed-return plan), median
+  and 25th-percentile outcomes, and, when a savings goal is set, the probability of reaching it
+  plus the contribution that would reach it on the central projection.
+
+  Sandidge's vital signs are deliberately **not** shown here, and that is a finding rather than
+  an omission. Testing on this model: with contributions going in, account value rarely falls,
+  so his momentum ratio has almost no variation to measure; his signs separated best from worst
+  outcomes by only 5–15 percentage points, against 38 for a plain funding ratio. More
+  importantly the direction of sequence risk **inverts** — weak returns early proved 22.9%
+  *better* for a saver, because contributions buy in cheaply — so his signs would raise the
+  alarm exactly when a saving plan is doing well. (His own paper says accumulation is linear and
+  order does not matter; that holds for a lump sum, but with monthly contributions the forward
+  and reversed orderings differed by a median 20% of final value.)
+
+  Note the required-contribution figure ignores volatility, so clearing the goal on that
+  projection still leaves roughly even odds — the probability figure is the honest one.
 - **Inflation-adjusted ("real") results** alongside nominal.
 - **Implied CAGR** for each percentile outcome and the fixed-return projection.
 - **Depletion date estimate** — first calendar month/year a percentile path hits zero.
