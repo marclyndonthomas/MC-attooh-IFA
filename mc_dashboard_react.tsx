@@ -14,6 +14,9 @@ declare global {
 /** A one-off lump sum paid into the portfolio in a given year. */
 interface Lump { id: number; amount: number; year: number }
 
+/** One year of a real client's history: the balance it ended on and what was drawn during it. */
+interface ActualYear { id: number; balance: number; withdrawal: number }
+
 /**
  * The two ranges carry their cost on differently-named fields, so narrow on the field
  * itself rather than on the selected range — the shape is the source of truth.
@@ -127,6 +130,11 @@ interface SimResults {
   labels: string[];
   avgInc: string; avgSkip: string; finalContrib: number;
   expectedBalance: number[];
+  /**
+   * Failure-odds curves keyed by sign then year, as (reading, odds) points. Carried out of the
+   * run so a real portfolio's figures can be read against them without simulating again.
+   */
+  curves: Record<string, Record<number, [number, number][]>> | null;
   /** Balance reached at the retirement pivot, across paths. Null for single-phase plans. */
   retirement: { year: number; p5: number; p50: number; p95: number; medianIncome: number } | null;
   guard: GuardStats | null;
@@ -189,6 +197,7 @@ export default function App() {
   const [modelRange, setModelRange]   = useState("dna");         // "dna" | "monarch" — which preset list is shown
   const [modelKey, setModelKey]       = useState("");            // selected model preset within modelRange ("" = custom)
   const [lumps, setLumps]             = useState<Lump[]>([]);
+  const [actuals, setActuals]         = useState<ActualYear[]>([]);   // a real portfolio's history, for review rather than planning
   const [results, setResults]         = useState<SimResults | null>(null);
   const [chartReady, setChartReady]   = useState(false);
   const c1Ref = useRef<HTMLCanvasElement | null>(null); const c1Inst = useRef<any>(null);
@@ -232,6 +241,97 @@ export default function App() {
     if (!retireMonths) return "Already drawing";
     const y = Math.floor(retireMonths / 12), m = retireMonths % 12;
     return (y ? y + (y === 1 ? " yr " : " yrs ") : "") + (m ? m + " mths" : "") || "this month";
+  })();
+
+  /**
+   * Review of a real portfolio. This is the use Sandidge's vital signs were built for: they
+   * measure experience a portfolio has actually had, so on a plan that has not started they
+   * carry almost nothing — at year one the paths that failed and the paths that came through
+   * differ by about two points. Here they read a client's own figures against the odds the
+   * simulation produced, which is what makes them worth acting on.
+   *
+   * Derived in render from the stored curves, so typing a balance re-reads the odds without
+   * simulating again.
+   */
+  const review = (() => {
+    const curves = results?.curves ?? null;
+    if (!curves || actuals.length === 0) return null;
+
+    const rateFrom = (key: string, yr: number, v: number): number | null => {
+      const pts = curves[key]?.[yr];
+      if (!pts || !pts.length) return null;
+      if (v <= pts[0][0]) return pts[0][1];
+      if (v >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+      for (let i = 1; i < pts.length; i++) {
+        if (v <= pts[i][0]) {
+          const [v0, r0] = pts[i - 1], [v1, r1] = pts[i];
+          return v1 === v0 ? r1 : r0 + (v - v0) / (v1 - v0) * (r1 - r0);
+        }
+      }
+      return pts[pts.length - 1][1];
+    };
+
+    // Walk the entered years, accumulating the same cumulative signs the simulation tracks.
+    let prev = init;
+    let negYears = 0, bigLosses = 0, overdrawn = 0, ncav = 0;
+    let sumNegCav = 0, sumPosCav = 0, sumSqNegRet = 0, sumSqNegCav = 0;
+    const rows: { yr: number; ret: number; sig: Record<string, number> }[] = [];
+
+    actuals.forEach((a, i) => {
+      const yr = i + 1;
+      // The market return is implied: the balance had to get from last year's close to this
+      // one after the withdrawal came out. Treating the withdrawal as taken at year end is an
+      // approximation, and it slightly understates the return on a heavy drawdown.
+      const mret = prev > 0 ? (a.balance + a.withdrawal) / prev - 1 : 0;
+      const cav  = prev > 0 ? (a.balance - prev) / prev : 0;
+      if (mret < 0) { negYears++; sumSqNegRet += mret * mret; }
+      if (mret <= -0.05) bigLosses++;
+      if (cav < 0) { ncav++; sumNegCav += -cav; sumSqNegCav += cav * cav; } else sumPosCav += cav;
+      const distRate = a.balance > 0 ? a.withdrawal / a.balance * 100 : 0;
+      if (distRate / 100 + otherFees / 100 > mret) overdrawn++;
+      rows.push({
+        yr, ret: mret,
+        sig: {
+          negYears, bigLosses, overdrawn, ncav,
+          moro: sumPosCav > 0 ? (sumNegCav / sumPosCav) * 100 : (sumNegCav > 0 ? 999 : 0),
+          aer: Math.pow(Math.max(a.balance, 1) / init, 1 / yr) - 1,
+          distRate,
+          sd: Math.sqrt(sumSqNegRet / yr) * 100,
+          scav: Math.sqrt(sumSqNegCav / yr) * 100,
+        },
+      });
+      prev = a.balance;
+    });
+
+    const latest = rows[rows.length - 1];
+    const KEYS = ["negYears", "bigLosses", "overdrawn", "ncav", "moro", "aer", "distRate", "sd", "scav"];
+    const odds = KEYS.map(k => rateFrom(k, latest.yr, latest.sig[k])).filter((r): r is number => r !== null);
+    const afr = odds.length ? odds.reduce((a, b) => a + b, 0) / odds.length : null;
+
+    // The same score for every year entered, so the trend is visible rather than just the latest.
+    const afrByYear = rows.map(r => {
+      const os = KEYS.map(k => rateFrom(k, r.yr, r.sig[k])).filter((x): x is number => x !== null);
+      return os.length ? os.reduce((a, b) => a + b, 0) / os.length : null;
+    });
+
+    const label: Record<string, string> = {
+      negYears: "Negative years", bigLosses: "Losses of 5%+", overdrawn: "Overdrawn years",
+      ncav: "Years value fell", moro: "Momentum (MoRo)", aer: "Erosion rate",
+      distRate: "Withdrawal rate", sd: "Downside spread", scav: "Value-change spread",
+    };
+    const shown: Record<string, (v: number) => string> = {
+      negYears: v => String(v), bigLosses: v => String(v), overdrawn: v => String(v), ncav: v => String(v),
+      moro: v => v >= 999 ? "all falls, no rises" : Math.round(v) + "%", aer: v => (v * 100).toFixed(1) + "%",
+      distRate: v => v.toFixed(1) + "%", sd: v => v.toFixed(1) + "%", scav: v => v.toFixed(1) + "%",
+    };
+    const table = KEYS.map(k => ({
+      key: k, label: label[k],
+      value: shown[k](latest.sig[k]),
+      odds: rateFrom(k, latest.yr, latest.sig[k]),
+    }));
+
+    const beyond = latest.yr > Math.max(1, years - 1);
+    return { rows, latest, afr, afrByYear, table, beyond, moro: latest.sig.moro };
   })();
 
   /**
@@ -613,7 +713,29 @@ export default function App() {
         return { kind: "allSafe" };
       };
 
-      return { KEYS, rateOf, afrOf, thresholdOf, worseWhenHigher };
+      // A compact form of the same curves, for diagnosing a real portfolio's history. Keeping
+      // roughly forty points per sign per year means an adviser can type in actual figures and
+      // read the odds straight away, instead of re-running thousands of paths on every
+      // keystroke. Interpolating between the points recovers the curve closely enough.
+      const CURVE_PTS = 40;
+      const curves: Record<string, Record<number, [number, number][]>> = {};
+      KEYS.forEach(k => {
+        curves[k] = {};
+        for (const yrStr of Object.keys(sorted[k])) {
+          const yr = Number(yrStr);
+          const s = sorted[k][yr];
+          const n = s.v.length;
+          if (!n) continue;
+          const pts: [number, number][] = [];
+          for (let i = 0; i < CURVE_PTS; i++) {
+            const idx = Math.min(n - 1, Math.round(i * (n - 1) / (CURVE_PTS - 1)));
+            pts.push([s.v[idx], rateAt(s, idx)]);
+          }
+          curves[k][yr] = pts;
+        }
+      });
+
+      return { KEYS, rateOf, afrOf, thresholdOf, worseWhenHigher, curves };
     })();
 
     // Arm the health rule now that the unruled odds exist.
@@ -905,6 +1027,7 @@ export default function App() {
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
       expectedBalance,
+      curves: cal ? cal.curves : null,
       retirement: twoPhase && retBalances.length ? (() => {
         const rb = retBalances.slice().sort((a, b) => a - b);
         const at = (p: number) => rb[Math.min(rb.length - 1, Math.floor(p / 100 * rb.length))];
@@ -1268,6 +1391,41 @@ export default function App() {
           </>
         )}
 
+        {/* Review of a real portfolio. Only meaningful for a plan that draws, and only once a
+            run exists to supply the odds. */}
+        {planDraws && (
+          <>
+            {hr}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              {secLabel("Actual history")}
+              <button onClick={() => setActuals(a => [...a, { id: uid++, balance: init, withdrawal: Math.round(withdraw * 12) }])}
+                style={{ fontSize: 11, padding: "3px 8px", borderRadius: 5, border: "1px solid #185FA5", background: "none", color: "#185FA5", cursor: "pointer", fontWeight: 600, marginTop: -6 }}>+ Year</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
+              For reviewing a client already invested. Enter each year's closing balance and what was drawn. Starting value above is treated as the balance before year 1.
+            </div>
+            {actuals.length === 0 && <div style={{ fontSize: 11, color: "#ccc", marginBottom: 8 }}>No history entered — the diagnostic below stays on the simulated plan.</div>}
+            {actuals.map((a, i) => (
+              <div key={a.id} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#185FA5" }}>Year {i + 1}</span>
+                  <button onClick={() => setActuals(xs => xs.filter(x => x.id !== a.id))}
+                    style={{ background: "none", border: "none", color: "#ccc", fontSize: 16, cursor: "pointer" }}>×</button>
+                </div>
+                {sRowN("Closing balance (R)", 0, 1000000000, 10000, a.balance,
+                       v => setActuals(xs => xs.map(x => x.id === a.id ? { ...x, balance: v } : x)), "R", "#185FA5")}
+                {sRowN("Drawn during year (R)", 0, 100000000, 10000, a.withdrawal,
+                       v => setActuals(xs => xs.map(x => x.id === a.id ? { ...x, withdrawal: v } : x)), "R", "#D85A30")}
+                {review && review.rows[i] && (
+                  <div style={{ fontSize: 11, color: "#888" }}>
+                    Implied return: <strong style={{ color: review.rows[i].ret < 0 ? "#D85A30" : "#1D9E75" }}>{(review.rows[i].ret * 100).toFixed(1)}%</strong>
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+
         {hr}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           {secLabel("Capital injections")}
@@ -1531,6 +1689,86 @@ export default function App() {
           );
         })()}
 
+        {/* Review of the client's own figures. This is the diagnostic doing the job it was
+            designed for, so it leads; the simulated version below is illustrative by comparison. */}
+        {review && (() => {
+          const afrPct = review.afr === null ? null : Math.round(review.afr * 100);
+          const col = afrPct === null ? "#888" : afrPct < 50 ? "#1D9E75" : afrPct < 60 ? "#BA7517" : "#D85A30";
+          const word = afrPct === null ? "no reading" : afrPct < 50 ? "Healthy" : afrPct < 60 ? "Fragile" : "At risk";
+          const moroCol = review.moro < 100 ? "#1D9E75" : review.moro < 200 ? "#BA7517" : "#D85A30";
+          const r = 26, circ = 2 * Math.PI * r;
+          const trend = review.afrByYear.filter((x): x is number => x !== null);
+          const rising = trend.length > 1 && trend[trend.length - 1] > trend[0];
+          return (
+            <div style={{ borderTop: "1px solid #eee", background: "#f7fafd" }}>
+              <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
+                Client review · {review.rows.length} {review.rows.length === 1 ? "year" : "years"} of actual history
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · the client's own figures read against this plan's odds</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", padding: "8px 16px 4px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 18 }}>
+                  <svg width={64} height={64} viewBox="0 0 64 64">
+                    <circle cx={32} cy={32} r={r} fill="none" stroke="#eee" strokeWidth={7} />
+                    <circle cx={32} cy={32} r={r} fill="none" stroke={col} strokeWidth={7}
+                      strokeDasharray={`${circ * (afrPct ?? 0) / 100} ${circ}`} strokeLinecap="round" transform="rotate(-90 32 32)" />
+                    <text x={32} y={36} textAnchor="middle" fontSize={12} fontWeight={600} fill={col}>{afrPct === null ? "—" : afrPct + "%"}</text>
+                  </svg>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: col }}>{word}</div>
+                    <div style={{ fontSize: 11, color: "#aaa" }}>health score</div>
+                    <div style={{ fontSize: 10, color: "#bbb" }}>aim under 50%</div>
+                  </div>
+                </div>
+                <div style={{ paddingRight: 18, borderLeft: "1px solid #eee", paddingLeft: 18 }}>
+                  <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Momentum (MoRo)</div>
+                  <div style={{ fontSize: 17, fontWeight: 600, color: moroCol }}>{review.moro >= 999 ? "all falls" : Math.round(review.moro) + "%"}</div>
+                  <div style={{ fontSize: 11, color: "#bbb" }}>aim under 100%</div>
+                </div>
+                <div style={{ paddingRight: 18, borderLeft: "1px solid #eee", paddingLeft: 18 }}>
+                  <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Score by year</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#555" }}>
+                    {review.afrByYear.map((v, i) => (
+                      <span key={i} style={{ color: v === null ? "#ccc" : v >= 0.6 ? "#D85A30" : v >= 0.5 ? "#BA7517" : "#1D9E75" }}>
+                        {v === null ? "—" : Math.round(v * 100) + "%"}{i < review.afrByYear.length - 1 ? " · " : ""}
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#bbb", marginTop: 2 }}>{rising ? "trending worse" : "not worsening"}</div>
+                </div>
+              </div>
+
+              <div style={{ padding: "0 16px 12px", overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%", minWidth: 340 }}>
+                  <thead>
+                    <tr style={{ color: "#999" }}>
+                      <th style={{ textAlign: "left", fontWeight: 500, padding: "3px 8px 3px 0" }}>Warning sign</th>
+                      <th style={{ textAlign: "right", fontWeight: 500, padding: "3px 8px" }}>This client</th>
+                      <th style={{ textAlign: "right", fontWeight: 500, padding: "3px 0 3px 8px" }}>Plans like this failed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {review.table.map(row => {
+                      const o = row.odds === null ? null : Math.round(row.odds * 100);
+                      const oc = o === null ? "#bbb" : o < 50 ? "#1D9E75" : o < 60 ? "#BA7517" : "#D85A30";
+                      return (
+                        <tr key={row.key} style={{ borderTop: "1px solid #f0f0f0" }}>
+                          <td style={{ padding: "4px 8px 4px 0", color: "#555" }}>{row.label}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 600, color: "#333" }}>{row.value}</td>
+                          <td style={{ padding: "4px 0 4px 8px", textAlign: "right", fontWeight: 600, color: oc }}>{o === null ? "—" : o + "%"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 10, color: "#bbb", marginTop: 6 }}>
+                  Odds come from the simulated plan above, so the parameters need to match this client's mandate for them to mean anything. Returns are implied from the balances entered, treating each year's withdrawal as taken at year end.
+                  {review.beyond && <> <strong style={{ color: "#BA7517" }}>The history now runs past the simulated horizon, so the later years have no odds to read against.</strong></>}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Portfolio health — Sandidge's vital signs on the median path */}
         {results && results.health && (() => {
           const h = results.health;
@@ -1569,7 +1807,7 @@ export default function App() {
                 {/* Momentum ratio — Sandidge's own momentum measure */}
                 <div style={{ paddingRight: 18, borderLeft: "1px solid #eee", paddingLeft: 18 }}>
                   <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Momentum (MoRo)</div>
-                  <div style={{ fontSize: 17, fontWeight: 600, color: moroColor }}>{Math.round(moro)}%</div>
+                  <div style={{ fontSize: 17, fontWeight: 600, color: moroColor }}>{moro >= 999 ? "all falls" : Math.round(moro) + "%"}</div>
                   <div style={{ fontSize: 11, color: "#bbb" }}>aim under 100%</div>
                   <div style={{ fontSize: 10, color: "#bbb" }}>falls ÷ rises in value</div>
                 </div>
