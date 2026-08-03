@@ -223,6 +223,11 @@ export default function App() {
   const effContrib       = planMode === "post" ? 0 : contrib;
   const effWithdrawInput = planMode === "pre"  ? 0 : withdraw;
   const effRetireMonths  = planMode === "both" ? retireMonths : 0;
+  // Whether the plan draws at all. On a percentage basis there is no amount entered, so
+  // anything gated on the withdrawal figure alone would wrongly hide itself.
+  const planDraws = planMode === "pre" ? false
+    : planMode === "both" ? (wBasis === "percent" ? wPct > 0 : withdraw > 0)
+    : withdraw > 0;
   const retireLabel = (() => {
     if (!retireMonths) return "Already drawing";
     const y = Math.floor(retireMonths / 12), m = retireMonths % 12;
@@ -829,7 +834,14 @@ export default function App() {
       linear: cagr(linPort[linPort.length - 1]),
     };
 
-    const finalContrib = cEsc > 0 ? contrib * Math.pow(1 + cEsc, years) : contrib;
+    // Contributions stop at the pivot, so both the final figure and the total paid in run over
+    // the saving period rather than the whole horizon. Escalation is compounded rather than
+    // ignored, so an escalating plan no longer reports the year-one amount for every year.
+    const contribYears = twoPhase ? retireM / 12 : years;
+    const finalContrib = cEsc > 0 ? contrib * Math.pow(1 + cEsc, contribYears) : contrib;
+    const totalContributed = cEsc > 0
+      ? contrib * 12 * (Math.pow(1 + cEsc, contribYears) - 1) / cEsc
+      : contrib * 12 * contribYears;
 
     // ---- Funding position, for saving plans rather than drawdown ----
     // linPort is already the deterministic no-volatility projection, so the funding ratio is
@@ -888,7 +900,7 @@ export default function App() {
       pctSuccess: Math.round(100 * finals.filter(v => v > 1).length / N),
       pctBeat: Math.round(100 * finals.filter(v => v > init).length / N),
       pctRuined: Math.round(100 * finals.filter(v => v === 0).length / N),
-      totalIn: init + contrib * 12 * years + lumps.reduce((s, l) => s + l.amount, 0),
+      totalIn: init + totalContributed + lumps.reduce((s: number, l: any) => s + l.amount, 0),
       p5a, p50a, p75a, p95a, w5a, w50a, w75a, w95a, linPort, linW, dep, real, avgReturn,
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
@@ -1117,7 +1129,7 @@ export default function App() {
         {sRowN("Starting value (R)", 100000, 200000000, 100000, init, setInit, "R")}
         {planMode !== "post" && sRowN("Monthly contribution (R)", 0, 100000, 500, contrib, setContrib, "R")}
         {planMode !== "post" && sRow("Contribution escalation (%/yr)", 0, 20, 0.5, contribEsc, setContribEsc, contribEsc === 0 ? "None" : contribEsc.toFixed(1) + "%/yr", contribEsc > 0 ? "#1D9E75" : undefined)}
-        {contribEsc > 0 && results && <div style={{ fontSize: 11, color: "#1D9E75", marginTop: -8, marginBottom: 10 }}>Yr {years} contribution: {fmt(results.finalContrib)}/mo</div>}
+        {contribEsc > 0 && results && <div style={{ fontSize: 11, color: "#1D9E75", marginTop: -8, marginBottom: 10 }}>Yr {planMode === "both" ? Math.round(effRetireMonths/12) : years} contribution: {fmt(results.finalContrib)}/mo</div>}
         {/* Only a saving plan has a target to fund; a drawdown plan is judged on lasting instead. */}
         {planMode === "pre" && (
           <>
@@ -1174,13 +1186,32 @@ export default function App() {
             Taken as entered, so in today's money that is <strong style={{ color: "#D85A30" }}>{fmt(withdraw / Math.pow(1 + inflation / 100, retireMonths / 12))}</strong>/mo
           </div>
         )}
-        {withdraw > 0 && (
+        {/* The withdrawal rate has to be measured against the capital the income is actually
+            drawn from. On a combined plan that is the balance at retirement, not today's, and
+            there is no net figure to give: contributions stop before income starts, so the two
+            never run together and subtracting one from the other would describe a month that
+            never happens. */}
+        {effWithdrawInput > 0 && planMode !== "both" && (
           <div style={{ fontSize: 11, color: "#888", marginTop: -8, marginBottom: 10 }}>
             WR: <strong style={{ color: wr > 5 ? "#D85A30" : wr > 3.5 ? "#BA7517" : "#1D9E75" }}>{wr.toFixed(1)}%/yr</strong>
-            {" · "}
-            <span style={{ color: (contrib - withdraw) < 0 ? "#D85A30" : "#1D9E75" }}>
-              Net: {contrib - withdraw >= 0 ? "+" : "-"}R{Math.abs(contrib - withdraw).toLocaleString()}/mo
-            </span>
+            {effContrib > 0 && (
+              <>
+                {" · "}
+                <span style={{ color: (effContrib - effWithdrawInput) < 0 ? "#D85A30" : "#1D9E75" }}>
+                  Net: {effContrib - effWithdrawInput >= 0 ? "+" : "-"}R{Math.abs(effContrib - effWithdrawInput).toLocaleString()}/mo
+                </span>
+              </>
+            )}
+          </div>
+        )}
+        {planMode === "both" && withdraw > 0 && wBasis !== "percent" && (
+          <div style={{ fontSize: 11, color: "#888", marginTop: -8, marginBottom: 10 }}>
+            {results?.retirement && results.retirement.p50 > 0
+              ? (() => {
+                  const r = results.retirement.medianIncome * 12 / results.retirement.p50 * 100;
+                  return <>Draws <strong style={{ color: r > 5 ? "#D85A30" : r > 3.5 ? "#BA7517" : "#1D9E75" }}>{r.toFixed(1)}%/yr</strong> of the median balance at retirement</>;
+                })()
+              : <>The rate depends on the balance at retirement — run the simulation to see it</>}
           </div>
         )}
 
@@ -1668,7 +1699,7 @@ export default function App() {
         </div>
 
         {/* Withdrawal chart */}
-        {withdraw > 0 && (
+        {planDraws && (
           <div style={{ padding: "12px 16px 14px", borderTop: "1px solid #eee" }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#444", marginBottom: 8 }}>Annual income withdrawal</div>
             {legend([[COLORS.p95, "P95 best case", true], [COLORS.p90, "P75 optimistic", true], [COLORS.p50, "P50 median", false], [COLORS.p10, "P5 conservative", true], [COLORS.linear, "Fixed return", true]])}
@@ -1681,7 +1712,7 @@ export default function App() {
           <div style={{ padding: "8px 16px", borderTop: "1px solid #eee", display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#888", marginTop: "auto" }}>
             <span>Beat start: <strong style={{ color: "#222" }}>{results.pctBeat}%</strong></span>
             <span>Total invested: <strong style={{ color: "#222" }}>{fmt(results.totalIn)}</strong></span>
-            {withdraw > 0 && results.pctRuined > 0 && <span style={{ color: results.pctRuined > 20 ? "#D85A30" : "#888" }}>Depleted: <strong>{results.pctRuined}%</strong></span>}
+            {planDraws && results.pctRuined > 0 && <span style={{ color: results.pctRuined > 20 ? "#D85A30" : "#888" }}>Depleted: <strong>{results.pctRuined}%</strong></span>}
           </div>
         )}
       </div>
