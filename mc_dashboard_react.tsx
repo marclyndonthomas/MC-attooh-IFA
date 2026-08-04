@@ -1052,6 +1052,12 @@ export default function App() {
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
+  // Point the baseline at the year the client has actually reached, so the two panels describe
+  // the same moment. The slider still moves afterwards if a different year is wanted.
+  useEffect(() => {
+    if (actuals.length > 0) setHealthYear(actuals.length);
+  }, [actuals.length]);
+
   // Portfolio chart
   useEffect(() => {
     if (!chartReady || !results || !c1Ref.current) return;
@@ -1735,6 +1741,25 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 11, color: "#bbb", marginTop: 2 }}>{rising ? "trending worse" : "not worsening"}</div>
                 </div>
+                {/* The point of the comparison: is this client tracking better or worse than
+                    the plan expected by now, rather than just good or bad in isolation. */}
+                {(() => {
+                  const exp = results?.health?.afrByYear?.[review.latest.yr] ?? null;
+                  if (exp === null || afrPct === null) return null;
+                  const expPct = Math.round(exp * 100);
+                  const gap = afrPct - expPct;
+                  const gc = gap <= -5 ? "#1D9E75" : gap >= 5 ? "#D85A30" : "#888";
+                  return (
+                    <div style={{ borderLeft: "1px solid #eee", paddingLeft: 18 }}>
+                      <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Against the plan</div>
+                      <div style={{ fontSize: 17, fontWeight: 600, color: gc }}>{gap > 0 ? "+" : ""}{gap} pts</div>
+                      <div style={{ fontSize: 11, color: "#bbb" }}>plan expected {expPct}% by year {review.latest.yr}</div>
+                      <div style={{ fontSize: 10, color: "#bbb", marginTop: 2 }}>
+                        {gap <= -5 ? "ahead of plan" : gap >= 5 ? "behind plan" : "in line with plan"}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div style={{ padding: "0 16px 12px", overflowX: "auto" }}>
@@ -1770,7 +1795,12 @@ export default function App() {
         })()}
 
         {/* Portfolio health — Sandidge's vital signs on the median path */}
-        {results && results.health && (() => {
+        {/* Held back until there is a client history to compare against. At planning there is
+            nothing to monitor — the signs measure experience the plan has not had, and at year
+            one they separate the plans that failed from those that came through by about two
+            points, so they would add machinery without adding information. Once actual figures
+            exist this becomes the baseline the client is read against. */}
+        {results && results.health && actuals.length > 0 && (() => {
           const h = results.health;
           const yr = Math.min(Math.max(healthYear, 1), h.maxYear);
           const rows = h.rowsByYear[yr] ?? [];
@@ -1785,8 +1815,8 @@ export default function App() {
           return (
             <div style={{ borderTop: "1px solid #eee", background: "#fdfdfb" }}>
               <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
-                Portfolio health · median outcome, year {yr}
-                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · early warning signs of a plan losing ground</span>
+                Plan baseline · median outcome, year {yr}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · what the simulated plan looked like at this stage, for comparison with the client above</span>
               </div>
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4, padding: "8px 16px 4px" }}>
