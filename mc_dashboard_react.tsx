@@ -186,6 +186,17 @@ export default function App() {
   // What the plan covers. Previously implied by whether contributions, withdrawals and a
   // retirement date happened to be set; making it explicit means the sidebar can show only
   // the inputs that apply, and the engine is fed a consistent set rather than a leftover one.
+  // Who the report is for and who prepared it. Record-keeping only — deliberately absent from
+  // runSim's dependencies so a name can never move a number.
+  const [clientName, setClientName]     = useState("");
+  const [clientId, setClientId]         = useState("");
+  const [clientDob, setClientDob]       = useState("");
+  const [dobTouched, setDobTouched]     = useState(false);   // once edited by hand, the ID stops overwriting it
+  const [adviserName, setAdviserName]   = useState("");
+  const [fspPractice, setFspPractice]   = useState("");
+  const [fspCode, setFspCode]           = useState("");
+  const [adviserCode, setAdviserCode]   = useState("");
+
   const [planMode, setPlanMode]         = useState("post");     // "pre" | "post" | "both"
   const [retireDate, setRetireDate]     = useState("");         // "YYYY-MM"; blank = already drawing
   const [wBasis, setWBasis]             = useState("today");    // "today" | "atRet" | "percent"
@@ -214,6 +225,43 @@ export default function App() {
     s.onload = () => setChartReady(true);
     document.head.appendChild(s);
   }, []);
+
+  /**
+   * Date of birth read off a South African ID number, whose first six digits are YYMMDD.
+   * The century is not in the number, so it is inferred: a two-digit year at or below the
+   * current one is treated as this century, otherwise the last. That is the usual convention
+   * and only misreads someone over about a hundred, which the manual field then covers.
+   */
+  const dobFromId = (() => {
+    const digits = clientId.replace(/\D/g, "");
+    if (digits.length < 6) return null;
+    const yy = +digits.slice(0, 2), mm = +digits.slice(2, 4), dd = +digits.slice(4, 6);
+    if (!(mm >= 1 && mm <= 12) || !(dd >= 1 && dd <= 31)) return null;
+    const year = yy <= new Date().getFullYear() % 100 ? 2000 + yy : 1900 + yy;
+    const iso = `${year}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    const d = new Date(iso);
+    // Rejects dates that do not exist, such as the 31st of February.
+    if (isNaN(d.getTime()) || d.getMonth() + 1 !== mm || d.getDate() !== dd) return null;
+    return iso;
+  })();
+  const idLooksComplete = clientId.replace(/\D/g, "").length === 13;
+
+  // Fill from the ID until someone edits the field, after which their entry stands.
+  useEffect(() => {
+    if (dobFromId && !dobTouched) setClientDob(dobFromId);
+  }, [dobFromId, dobTouched]);
+
+  // Age from date of birth, purely so the entered date can be sanity-checked at a glance.
+  const clientAge = (() => {
+    if (!clientDob) return null;
+    const d = new Date(clientDob);
+    if (isNaN(d.getTime())) return null;
+    const now = new Date();
+    let a = now.getFullYear() - d.getFullYear();
+    const m = now.getMonth() - d.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < d.getDate())) a--;
+    return a >= 0 && a < 130 ? a : null;
+  })();
 
   const effEsc = escMode === "none" ? 0 : customEsc;
   const wr = init > 0 ? (withdraw * 12 / init * 100) : 0;
@@ -1233,6 +1281,15 @@ export default function App() {
   );
 
   // Exact-value number box (no slider), for fields advisors need to enter precisely (e.g. for a Record of Advice).
+  // Free text, for the record details rather than anything the simulation reads.
+  const textRow = (label: string, val: string, set: (v: string) => void, placeholder?: string) => (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>{label}</div>
+      <input type="text" value={val} placeholder={placeholder} onChange={e => set(e.target.value)}
+        style={{ width: "100%", padding: "5px 8px", fontSize: 12, borderRadius: 6, border: "1px solid #ccc", background: "#fff", color: "#222", boxSizing: "border-box" }} />
+    </div>
+  );
+
   const sRowN = (label: string, min: number, max: number, step: number, val: number, set: (v: number) => void, prefix?: string, col?: string, suffix?: string) => (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>{label}</div>
@@ -1283,6 +1340,40 @@ export default function App() {
       {/* SIDEBAR */}
       <div style={{ width: 256, minWidth: 256, background: "#f8f8f6", borderRight: "1px solid #e0e0e0", padding: "14px 13px", overflowY: "auto", maxHeight: "90vh", flexShrink: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#333", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #e0e0e0" }}>⚙ Parameters</div>
+
+        {/* Record details. These identify the report; none of them reach the simulation. */}
+        {secLabel("Client")}
+        {textRow("Client name", clientName, setClientName)}
+        {textRow("ID number", clientId, setClientId, "13 digits")}
+        {clientId && !idLooksComplete && (
+          <div style={{ fontSize: 11, color: "#BA7517", marginTop: -8, marginBottom: 10 }}>
+            {clientId.replace(/\D/g, "").length} digits — a South African ID has 13
+          </div>
+        )}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>Date of birth</span>
+            {dobTouched && dobFromId && dobFromId !== clientDob && (
+              <button onClick={() => { setDobTouched(false); setClientDob(dobFromId); }}
+                style={{ fontSize: 10, padding: 0, border: "none", background: "none", color: "#185FA5", cursor: "pointer", textDecoration: "underline" }}>use ID</button>
+            )}
+          </div>
+          <input type="date" value={clientDob}
+            onChange={e => { setDobTouched(true); setClientDob(e.target.value); }}
+            style={{ width: "100%", padding: "5px 8px", fontSize: 12, borderRadius: 6, border: "1px solid #ccc", background: "#fff", color: clientDob ? "#222" : "#888", boxSizing: "border-box" }} />
+          <div style={{ fontSize: 11, color: "#888", marginTop: 3 }}>
+            {clientAge !== null ? <>Age <strong style={{ color: "#333" }}>{clientAge}</strong></> : "—"}
+            {clientDob && dobFromId === clientDob && !dobTouched && <span style={{ color: "#bbb" }}> · from ID number</span>}
+            {dobTouched && clientDob && <span style={{ color: "#bbb" }}> · entered manually</span>}
+          </div>
+        </div>
+
+        {secLabel("Adviser")}
+        {textRow("FSP practice", fspPractice, setFspPractice)}
+        {textRow("FSP code", fspCode, setFspCode)}
+        {textRow("Adviser name", adviserName, setAdviserName)}
+        {textRow("Adviser code", adviserCode, setAdviserCode)}
+        {hr}
 
         {/* What the plan covers. Drives which inputs below apply and which are hidden. */}
         <div style={{ marginBottom: 14 }}>
@@ -1583,7 +1674,25 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflowY: "auto" }}>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #eee" }}>
-          <span style={{ fontSize: 15, fontWeight: 700 }}>Monte Carlo forecast</span>
+          <div>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>Monte Carlo Simulation</span>
+            {/* Whoever the report is for, on the report itself. */}
+            {(clientName || clientId || clientDob) && (
+              <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
+                {clientName && <strong style={{ color: "#333" }}>{clientName}</strong>}
+                {clientId && <>{clientName ? " · " : ""}ID {clientId}</>}
+                {clientAge !== null && <> · age {clientAge}</>}
+              </div>
+            )}
+            {(adviserName || adviserCode || fspPractice || fspCode) && (
+              <div style={{ fontSize: 11, color: "#888", marginTop: 1 }}>
+                {fspPractice}
+                {fspCode && <>{fspPractice ? " · " : ""}FSP {fspCode}</>}
+                {adviserName && <>{(fspPractice || fspCode) ? " · " : ""}{adviserName}</>}
+                {adviserCode && <> · rep {adviserCode}</>}
+              </div>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, background: "#f0f0f0", color: "#555" }}>
               Variable return and sequence risk
