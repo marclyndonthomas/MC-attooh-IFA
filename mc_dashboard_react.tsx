@@ -114,7 +114,7 @@ interface FundingStats {
 }
 
 /** One metric card: label, value, sub-label, colour, depletion date, real value, CAGR. */
-type MetricCard = [string, string, string, string, string | null, number | null, number | null];
+type MetricCard = [string, string, string, string, string | null, number | null, { earned: number; real: number | null; balance: number | null } | null];
 
 /** Everything one simulation run produces, as consumed by the charts and cards. */
 interface SimResults {
@@ -126,7 +126,9 @@ interface SimResults {
   linPort: number[]; linW: number[];
   dep: ByPercentile<string | null>;
   real: ByPercentile<number>;
-  avgReturn: ByPercentile<number | null>;
+  /** Per percentile: what the investments earned, that figure after inflation, and how the
+   *  capital itself moved once contributions and withdrawals are counted. */
+  avgReturn: ByPercentile<{ earned: number; real: number | null; balance: number | null }>;
   labels: string[];
   avgInc: string; avgSkip: string; finalContrib: number;
   expectedBalance: number[];
@@ -585,7 +587,14 @@ export default function App() {
         if (val < 0) val = 0;
         if ((m + 1) % 12 === 0) path.push(val);
       }
-      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement };
+      // What the investments themselves earned, compounded across every month and annualised.
+      // Independent of contributions and withdrawals, so it is a return in the sense an adviser
+      // means it, unlike the change in balance which cash flows dominate.
+      let growth = 1;
+      for (let m = 0; m < months; m++) growth *= (1 + monthlyReturns[m]);
+      const earned = Math.pow(growth, 1 / years) - 1;
+
+      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned };
     };
 
     // Each path draws independently, so results carry both an uncertain realised
@@ -743,6 +752,7 @@ export default function App() {
 
     const allSigns: VitalSigns[][] = [];
     const retBalances: number[] = [];   // balance each path reached at the retirement pivot
+    const earneds: number[] = [];       // what the investments earned on each path, before cash flows
 
     for (let s = 0; s < N; s++) {
       const monthlyReturns = genReturns();
@@ -762,7 +772,7 @@ export default function App() {
         if (r.final > 1) { successCount++; freezeOnSuccess += r.freezeYears.length; }
       }
 
-      finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath);
+      finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath); earneds.push(r.earned);
       if (twoPhase) retBalances.push(r.balAtRetirement);
     }
 
@@ -860,8 +870,14 @@ export default function App() {
       };
     })();
 
-    finals.sort((a, b) => a - b);
-    const pct = (p: number) => finals[Math.floor(p / 100 * N)];
+    // Sort by outcome through an index, so each percentile keeps the return its own path
+    // actually earned rather than being paired with another path's.
+    const order = finals.map((_, i) => i).sort((a, b) => finals[a] - finals[b]);
+    const sortedFinals = order.map(i => finals[i]);
+    const sortedEarned = order.map(i => earneds[i]);
+    const at = (p: number) => Math.min(N - 1, Math.floor(p / 100 * N));
+    const pct = (p: number) => sortedFinals[at(p)];
+    const earnedAt = (p: number) => sortedEarned[at(p)];
 
     const p5a: number[] = [], p50a: number[] = [], p75a: number[] = [], p95a: number[] = [];
     const w5a: number[] = [], w50a: number[] = [], w75a: number[] = [], w95a: number[] = [];
@@ -947,13 +963,24 @@ export default function App() {
     };
 
     // Implied CAGR
-    const cagr = (t: number) => (init <= 0 || t <= 0 || years <= 0) ? null : (Math.pow(t / init, 1 / years) - 1) * 100;
+    // Three different questions, so three different figures.
+    //   earned  - what the investments returned, compounded and annualised, before any money
+    //             moved in or out. This is the performance figure.
+    //   real    - the same after inflation, so it is purchasing power rather than rands.
+    //   balance - how the capital itself changed, which cash flows dominate: a drawdown plan
+    //             shows a fall even when the investments did well, and a savings plan shows a
+    //             rise far above what anything earned. Useful, but not a return.
+    const balanceCagr = (t: number) => (init <= 0 || t <= 0 || years <= 0) ? null : (Math.pow(t / init, 1 / years) - 1) * 100;
+    const afterInflation = (nom: number | null) =>
+      nom === null ? null : ((1 + nom / 100) / (1 + inflation / 100) - 1) * 100;
+    const linEarned = (Math.pow(1 + muM, 12) - 1) * 100;
+    const triple = (p: number) => {
+      const e = earnedAt(p) * 100;
+      return { earned: e, real: afterInflation(e), balance: balanceCagr(pct(p)) };
+    };
     const avgReturn = {
-      p5: cagr(pct(5)),
-      p50: cagr(pct(50)),
-      p75: cagr(pct(75)),
-      p95: cagr(pct(95)),
-      linear: cagr(linPort[linPort.length - 1]),
+      p5: triple(5), p50: triple(50), p75: triple(75), p95: triple(95),
+      linear: { earned: linEarned, real: afterInflation(linEarned), balance: balanceCagr(linPort[linPort.length - 1]) },
     };
 
     // Contributions stop at the pivot, so both the final figure and the total paid in run over
@@ -1505,9 +1532,9 @@ export default function App() {
         </div>
 
         {sRow("Expected return (average %/yr)", 1, 20, .5, ret, setRet, ret.toFixed(1) + "%")}
-        {results && results.avgReturn.p50 != null && (
+        {results && (
           <div style={{ fontSize: 11, color: "#888", marginTop: -8, marginBottom: 10 }}>
-            Typical compound growth ≈ <strong style={{ color: "#1D9E75" }}>{results.avgReturn.p50.toFixed(2)}%</strong> once volatility is allowed for
+            <>Typical compound return ≈ <strong style={{ color: "#1D9E75" }}>{results.avgReturn.p50.earned.toFixed(2)}%</strong> once volatility is allowed for</>
           </div>
         )}
         {sRow("Annual volatility %", 1, 40, .5, vol, setVol, vol.toFixed(1) + "%")}
@@ -1565,8 +1592,21 @@ export default function App() {
               <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>{label}</div>
               <div style={{ fontSize: 17, fontWeight: 600, color: color || "#111" }}>{value}</div>
               <div style={{ fontSize: 11, color: "#bbb" }}>{sub}</div>
-              {cagr != null && <div style={{ fontSize: 11, color: "#888", marginTop: 3 }}>CAGR: <strong style={{ color: cagr >= 0 ? "#1D9E75" : "#D85A30" }}>{cagr.toFixed(2)}%</strong></div>}
-              {realVal != null && <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>Real: <strong style={{ color: "#555" }}>{fmt(realVal)}</strong></div>}
+              {cagr != null && (
+                <>
+                  <div style={{ fontSize: 11, color: "#888", marginTop: 3 }}>
+                    Earned: <strong style={{ color: cagr.earned >= 0 ? "#1D9E75" : "#D85A30" }}>{cagr.earned.toFixed(2)}%</strong>
+                    {cagr.real != null && <> · real <strong style={{ color: cagr.real >= 0 ? "#1D9E75" : "#D85A30" }}>{cagr.real.toFixed(2)}%</strong></>}
+                  </div>
+                  {cagr.balance != null && (
+                    <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
+                      Capital: <strong style={{ color: cagr.balance >= 0 ? "#1D9E75" : "#D85A30" }}>{cagr.balance.toFixed(2)}%</strong>
+                      <span style={{ color: "#bbb" }}> after cash flow</span>
+                    </div>
+                  )}
+                </>
+              )}
+              {realVal != null && <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>Real value: <strong style={{ color: "#555" }}>{fmt(realVal)}</strong></div>}
               {depleteAt && <div style={{ fontSize: 11, color: "#D85A30", marginTop: 3, fontWeight: 500 }}>⚠ {depleteAt}</div>}
             </div>
           ))}
