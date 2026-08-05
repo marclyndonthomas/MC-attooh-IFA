@@ -142,7 +142,7 @@ interface SimResults {
   funding: FundingStats | null;
 }
 
-const COLORS = { p95: "#8B5CF6", p90: "#378ADD", p50: "#1D9E75", p10: "#D85A30", linear: "#f59e0b" };
+const COLORS = { p95: "#8B5CF6", p90: "#378ADD", p50: "#1D9E75", p10: "#D85A30", linear: "#f59e0b", actual: "#111827" };
 
 function fmt(v: number) {
   if (v >= 1e6) return "R" + (v / 1e6).toFixed(2) + "M";
@@ -1083,6 +1083,14 @@ export default function App() {
         { type: "line", label: "P50",    data: results.p50a,    borderColor: COLORS.p50,    borderWidth: 2.5, pointRadius: 0, tension: .4, fill: false, order: 0 },
         { type: "line", label: "P5",     data: results.p5a,     borderColor: COLORS.p10,    borderWidth: 2,   pointRadius: 0, tension: .4, fill: false, borderDash: [4, 4], order: 2 },
         { type: "line", label: "Fixed return", data: results.linPort, borderColor: COLORS.linear, borderWidth: 2,   pointRadius: 0, tension: 0,  fill: false, borderDash: [8, 4], order: 3 },
+        // The client's real balances, drawn over the simulated spread. Solid, heavier and with
+        // visible points, since these are observations rather than a projection, and it stops
+        // after the last year entered rather than running to the horizon.
+        ...(actuals.length ? [{
+          type: "line", label: "Actual", data: [init, ...actuals.map(a => a.balance)],
+          borderColor: COLORS.actual, backgroundColor: COLORS.actual,
+          borderWidth: 3, pointRadius: 3, pointHoverRadius: 5, tension: 0, fill: false, order: -1,
+        }] : []),
       ]},
       options: {
         responsive: true, maintainAspectRatio: false, animation: { duration: 350 },
@@ -1093,7 +1101,7 @@ export default function App() {
         plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c: any) => { const v = c.raw; return typeof v === "object" && Array.isArray(v.y) ? `Band: ${fmt(v.y[0])}–${fmt(v.y[1])}` : `${c.dataset.label}: ${fmt(v)}`; } } } }
       }, plugins: [annPlugin]
     });
-  }, [results, chartReady, lumps]);
+  }, [results, chartReady, lumps, actuals, init]);
 
   // Withdrawal chart
   useEffect(() => {
@@ -1166,7 +1174,9 @@ export default function App() {
       },
       plugins: [evenOdds]
     });
-  }, [results, chartReady]);
+    // actuals.length matters because the panel holding this canvas only renders once a
+    // client history exists; without it the effect never re-runs and the chart stays blank.
+  }, [results, chartReady, actuals.length]);
 
   const sRow = (label: string, min: number, max: number, step: number, val: number, set: (v: number) => void, disp: ReactNode, col?: string) => (
     <div style={{ marginBottom: 12 }}>
@@ -1962,7 +1972,12 @@ export default function App() {
         {/* Portfolio chart */}
         <div style={{ padding: "12px 16px 14px" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "#444", marginBottom: 8 }}>Portfolio value</div>
-          {legend([[COLORS.p95, "P95 best case", true], [COLORS.p90, "P75 optimistic", true], [COLORS.p50, "P50 median", false], [COLORS.p10, "P5 conservative", true], [COLORS.linear, "Fixed return", true]])}
+          {legend([
+            ...(actuals.length ? [[COLORS.actual, "Actual", false] as [string, string, boolean]] : []),
+            [COLORS.p95, "P95 best case", true], [COLORS.p90, "P75 optimistic", true],
+            [COLORS.p50, "P50 median", false], [COLORS.p10, "P5 conservative", true],
+            [COLORS.linear, "Fixed return", true],
+          ])}
           <div style={{ position: "relative", height: 220 }}><canvas ref={c1Ref} /></div>
         </div>
 
