@@ -121,6 +121,8 @@ interface SimResults {
   p5: number; p50: number; p75: number; p95: number;
   pctSuccess: number; pctBeat: number; pctRuined: number;
   totalIn: number;
+  /** Income actually paid out on the median path, nominal and in today's money. */
+  drawnMedian: number; drawnMedianReal: number;
   p5a: number[]; p50a: number[]; p75a: number[]; p95a: number[];
   w5a: number[]; w50a: number[]; w75a: number[]; w95a: number[];
   linPort: number[]; linW: number[];
@@ -510,6 +512,7 @@ export default function App() {
       let skips = 0, incs = 0;
 
       // Running vital-sign accumulators (all cumulative — that is the point of momentum).
+      let drawn = 0, drawnReal = 0;   // income actually paid out, nominal and in today's money
       let negYears = 0, bigLosses = 0, overdrawn = 0, ncav = 0;
       let sumNegCav = 0, sumPosCav = 0, sumSqNegRet = 0, sumSqNegCav = 0;
       const signs: VitalSigns[] = [];
@@ -583,8 +586,15 @@ export default function App() {
         }
 
         if (lumpMap[m]) val += lumpMap[m];
-        val = val * (1 + monthlyReturns[m]) + curC - curW;
+        // Take only what is there. Arithmetically the same as subtracting and flooring at
+        // zero, but it makes the amount actually paid out available to count, which matters
+        // in the final months of a portfolio that runs dry mid-year.
+        const gross = val * (1 + monthlyReturns[m]) + curC;
+        const taken = Math.min(curW, Math.max(0, gross));
+        val = gross - taken;
         if (val < 0) val = 0;
+        drawn += taken;
+        drawnReal += taken / Math.pow(1 + inflation / 100, (m + 1) / 12);
         if ((m + 1) % 12 === 0) path.push(val);
       }
       // What the investments themselves earned, compounded across every month and annualised.
@@ -594,7 +604,7 @@ export default function App() {
       for (let m = 0; m < months; m++) growth *= (1 + monthlyReturns[m]);
       const earned = Math.pow(growth, 1 / years) - 1;
 
-      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned };
+      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned, drawn, drawnReal };
     };
 
     // Each path draws independently, so results carry both an uncertain realised
@@ -753,6 +763,7 @@ export default function App() {
     const allSigns: VitalSigns[][] = [];
     const retBalances: number[] = [];   // balance each path reached at the retirement pivot
     const earneds: number[] = [];       // what the investments earned on each path, before cash flows
+    const drawns: number[] = [], drawnReals: number[] = [];   // income paid out on each path
 
     for (let s = 0; s < N; s++) {
       const monthlyReturns = genReturns();
@@ -773,6 +784,7 @@ export default function App() {
       }
 
       finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath); earneds.push(r.earned);
+      drawns.push(r.drawn); drawnReals.push(r.drawnReal);
       if (twoPhase) retBalances.push(r.balAtRetirement);
     }
 
@@ -1050,6 +1062,10 @@ export default function App() {
       pctBeat: Math.round(100 * finals.filter(v => v > init).length / N),
       pctRuined: Math.round(100 * finals.filter(v => v === 0).length / N),
       totalIn: init + totalContributed + lumps.reduce((s: number, l: any) => s + l.amount, 0),
+      // Median of the income actually paid out, which is not the income of the median-value
+      // path: a plan that ran dry early paid out less, so the two distributions differ.
+      drawnMedian: drawns.slice().sort((a, b) => a - b)[Math.floor(0.5 * N)],
+      drawnMedianReal: drawnReals.slice().sort((a, b) => a - b)[Math.floor(0.5 * N)],
       p5a, p50a, p75a, p95a, w5a, w50a, w75a, w95a, linPort, linW, dep, real, avgReturn,
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
@@ -2035,6 +2051,11 @@ export default function App() {
           <div style={{ padding: "8px 16px", borderTop: "1px solid #eee", display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#888", marginTop: "auto" }}>
             <span>Beat start: <strong style={{ color: "#222" }}>{results.pctBeat}%</strong></span>
             <span>Total invested: <strong style={{ color: "#222" }}>{fmt(results.totalIn)}</strong></span>
+            {planDraws && results.drawnMedian > 0 && (
+              <span>Income drawn: <strong style={{ color: "#222" }}>{fmt(results.drawnMedian)}</strong>
+                <span style={{ color: "#bbb" }}> · {fmt(results.drawnMedianReal)} in today's money</span>
+              </span>
+            )}
             {planDraws && results.pctRuined > 0 && <span style={{ color: results.pctRuined > 20 ? "#D85A30" : "#888" }}>Depleted: <strong>{results.pctRuined}%</strong></span>}
           </div>
         )}
