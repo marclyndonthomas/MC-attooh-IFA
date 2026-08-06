@@ -178,8 +178,8 @@ export default function App() {
   const [savingsTarget, setSavingsTarget] = useState(0);        // R goal for a saving plan; 0 = judge against the central projection only
   // Bucket structure is a reporting overlay only. These two live outside the simulation and
   // are deliberately kept out of runSim's dependencies — see bucketView below.
-  const [bucket1Years, setBucket1Years] = useState(3);          // years of withdrawals held in cash
-  const [bucket2Years, setBucket2Years] = useState(4);          // years of withdrawals held in bonds
+  const [bucket1Years, setBucket1Years] = useState(3);          // years of withdrawals held in the conservative bucket
+  const [bucket2Years, setBucket2Years] = useState(4);          // years of withdrawals held in the moderate bucket
   // Retirement pivot. 0 keeps the original single-phase behaviour, where contributions and
   // withdrawals both run from the start; above 0 the plan contributes until that year and
   // draws afterwards, so one run can span working life and retirement.
@@ -451,9 +451,9 @@ export default function App() {
     const pctOf = (v: number) => baseCapital > 0 ? 100 * v / baseCapital : 0;
     return {
       rows: [
-        { key: "cash",   label: "Bucket 1 · cash",   yrs: b1Yrs, amount: b1, pct: pctOf(b1), color: "#1D9E75" },
-        { key: "bonds",  label: "Bucket 2 · bonds",  yrs: b2Yrs, amount: b2, pct: pctOf(b2), color: "#378ADD" },
-        { key: "equity", label: "Bucket 3 · equity", yrs: b3Yrs, amount: Math.max(0, b3), pct: pctOf(Math.max(0, b3)), color: "#8B5CF6" },
+        { key: "cash",   label: "Bucket 1 · Conservative",   yrs: b1Yrs, amount: b1, pct: pctOf(b1), color: "#1D9E75" },
+        { key: "bonds",  label: "Bucket 2 · Moderate",  yrs: b2Yrs, amount: b2, pct: pctOf(b2), color: "#378ADD" },
+        { key: "equity", label: "Bucket 3 · Aggressive", yrs: b3Yrs, amount: Math.max(0, b3), pct: pctOf(Math.max(0, b3)), color: "#8B5CF6" },
       ],
       overCommitted, shortfall: overCommitted ? -b3 : 0,
       runwayMonths, runwayEnds, b1Yrs, b2Yrs, b3Yrs, baseCapital, atRetirement: twoPhaseView,
@@ -1533,10 +1533,10 @@ export default function App() {
             <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
               Splits the opening capital by how many years of withdrawals each bucket covers. Presentation only — it does not change the simulation.
             </div>
-            {sRow("Bucket 1 · cash (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years, bucketView.b1Yrs + (bucketView.b1Yrs === 1 ? " yr" : " yrs"), "#1D9E75")}
-            {sRow("Bucket 2 · bonds (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years, bucketView.b2Yrs + (bucketView.b2Yrs === 1 ? " yr" : " yrs"), "#378ADD")}
+            {sRow("Bucket 1 · Conservative (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years, bucketView.b1Yrs + (bucketView.b1Yrs === 1 ? " yr" : " yrs"), "#1D9E75")}
+            {sRow("Bucket 2 · Moderate (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years, bucketView.b2Yrs + (bucketView.b2Yrs === 1 ? " yr" : " yrs"), "#378ADD")}
             <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
-              Bucket 3 · equity takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketView.b3Yrs} {bucketView.b3Yrs === 1 ? "yr" : "yrs"}</strong>
+              Bucket 3 · Aggressive takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketView.b3Yrs} {bucketView.b3Yrs === 1 ? "yr" : "yrs"}</strong>
             </div>
           </>
         )}
@@ -1826,7 +1826,7 @@ export default function App() {
 
             {bucketView.overCommitted && (
               <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "7px 9px", margin: "0 16px 8px" }}>
-                Cash and bonds as specified need {fmt(bucketView.shortfall)} more than the whole portfolio, so there is nothing left for equity. Shorten the cash or bond horizon, or revisit the withdrawal.
+                Buckets 1 and 2 as specified need {fmt(bucketView.shortfall)} more than the whole portfolio, so there is nothing left for bucket 3. Shorten one of the horizons, or revisit the withdrawal.
               </div>
             )}
 
