@@ -205,6 +205,8 @@ export default function App() {
   const [spendPolicy, setSpendPolicy]   = useState("lifestyle");  // "lifestyle" | "endowment"
   const [spendRate, setSpendRate]       = useState(5);            // % of portfolio the policy targets
   const [smoothing, setSmoothing]       = useState(90);           // % weight on last year's amount
+  const [solveConf, setSolveConf]       = useState(90);           // confidence the solver aims at
+  const [solved, setSolved]             = useState<{ rate: number; conf: number; years: number; capped: string | null } | null>(null);
 
   const [planMode, setPlanMode]         = useState("post");     // "pre" | "post" | "both"
   const [retireDate, setRetireDate]     = useState("");         // "YYYY-MM"; blank = already drawing
@@ -495,6 +497,57 @@ export default function App() {
     && ret === activeModel.nominalReturn
     && vol === activeModel.vol
     && inflation === INFLATION_ASSUMPTION;
+
+  /**
+   * The inverse question: rather than "how does this rate fare", solve for the rate that
+   * meets a wanted confidence. Bisects on the target rate.
+   *
+   * The return paths are drawn ONCE and reused for every candidate, which matters more than
+   * it looks: it makes success a smooth, strictly falling function of the rate, so the search
+   * converges on a real answer instead of chasing sampling noise between iterations.
+   *
+   * Deliberately narrow — it models a drawdown under the Income Review rule and nothing else.
+   * Contributions, injections and the retirement pivot are ignored, so it is only offered for
+   * a plan that is already drawing.
+   */
+  const solveTargetRate = () => {
+    const months = years * 12;
+    const muL = (ret - otherFees) / 100 / 12;
+    const sigL = vol / 100 / Math.sqrt(12);
+    const cpiL = inflation / 100;
+    const wL = smoothing / 100;
+    const PATHS = Math.min(sims, 2000);
+
+    const paths: number[][] = Array.from({ length: PATHS }, () =>
+      Array.from({ length: months }, () => muL + sigL * randn()));
+
+    const successAt = (rate: number) => {
+      let ok = 0;
+      for (const mr of paths) {
+        let val = init, curW = init * rate / 12;
+        for (let m = 0; m < months; m++) {
+          if (m > 0 && m % 12 === 0) curW = (wL * (curW * 12) + (1 - wL) * (val * rate)) * (1 + cpiL) / 12;
+          const gross = val * (1 + mr[m]);
+          const taken = Math.min(curW, Math.max(0, gross));
+          val = gross - taken;
+        }
+        if (val > 1) ok++;
+      }
+      return ok / PATHS;
+    };
+
+    const want = solveConf / 100;
+    const LO = 0.005, HI = 0.25;
+    // Say so when the answer runs off either end rather than reporting the boundary as a result.
+    if (successAt(HI) >= want) { setSolved({ rate: HI, conf: solveConf, years, capped: "above" }); return; }
+    if (successAt(LO) < want)  { setSolved({ rate: LO, conf: solveConf, years, capped: "below" }); return; }
+    let lo = LO, hi = HI;
+    for (let i = 0; i < 16; i++) {
+      const mid = (lo + hi) / 2;
+      if (successAt(mid) >= want) lo = mid; else hi = mid;
+    }
+    setSolved({ rate: lo, conf: solveConf, years, capped: null });
+  };
 
   const runSim = useCallback(() => {
     // Bind the mode-adjusted inputs to the names the engine below already uses, so every
@@ -1495,6 +1548,42 @@ export default function App() {
             </div>
             {sRow("Spending rate (%/yr)", 2, 10, 0.25, spendRate, setSpendRate, spendRate.toFixed(2) + "% of portfolio", "#D85A30")}
             {sRow("Smoothing (% on last year)", 50, 100, 5, smoothing, setSmoothing, smoothing + "/" + (100 - smoothing), "#185FA5")}
+
+            {/* Work the question backwards: pick the confidence, get the rate. Only offered on
+                a plan that is already drawing, since that is all the solver models. */}
+            {planMode === "post" && (
+              <div style={{ border: "1px solid #c5dcf5", background: "#f7fbff", borderRadius: 6, padding: "8px 9px", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#185FA5", marginBottom: 6 }}>What rate can this portfolio carry?</div>
+                {sRow("Confidence wanted", 50, 99, 1, solveConf, setSolveConf, solveConf + "%", "#185FA5")}
+                <button onClick={solveTargetRate}
+                  style={{ width: "100%", padding: "6px 0", fontSize: 12, fontWeight: 600, borderRadius: 6, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", cursor: "pointer" }}>
+                  Solve target rate
+                </button>
+                {solved && (
+                  <div style={{ fontSize: 11, color: "#555", marginTop: 7 }}>
+                    {solved.capped === "above"
+                      ? <>Even {(0.25 * 100).toFixed(0)}% clears {solved.conf}% over {solved.years} yrs — the horizon is short enough that the rate is not the binding constraint.</>
+                      : solved.capped === "below"
+                      ? <>No rate above 0.5% reaches {solved.conf}% over {solved.years} yrs on these assumptions.</>
+                      : <>
+                          <strong style={{ color: "#185FA5", fontSize: 13 }}>{(solved.rate * 100).toFixed(1)}%</strong>
+                          {" "}for {solved.conf}% confidence over {solved.years} yrs
+                          <br />
+                          <span style={{ color: "#888" }}>about {fmt(init * solved.rate / 12)}/mo to start</span>
+                        </>}
+                    <div style={{ fontSize: 10, color: "#bbb", marginTop: 4 }}>
+                      Good to about a tenth of a percent — it is read off sampled paths, so a re-run will not land on exactly the same figure. It also moves with every other assumption here, return, volatility, inflation and fees, so it is not a portable number. Set the horizon to a cautious life expectancy rather than an average one, or this quietly becomes "older clients can draw more".
+                    </div>
+                    {Math.abs(solved.rate * 100 - spendRate) > 0.05 && (
+                      <button onClick={() => setSpendRate(Math.round(solved.rate * 1000) / 10)}
+                        style={{ marginTop: 6, fontSize: 11, padding: "3px 8px", borderRadius: 5, border: "1px solid #1D9E75", background: "none", color: "#1D9E75", cursor: "pointer", fontWeight: 600 }}>
+                        Use {(solved.rate * 100).toFixed(1)}% as the target
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 10 }}>
               Opening income <strong style={{ color: "#D85A30" }}>{fmt(init * spendRate / 100 / 12)}</strong>/mo
               {planMode === "both" && <> · set from the balance at retirement instead</>}
