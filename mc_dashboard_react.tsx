@@ -123,6 +123,8 @@ interface SimResults {
   totalIn: number;
   /** Income actually paid out on the median path, nominal and in today's money. */
   drawnMedian: number; drawnMedianReal: number;
+  /** Under a portfolio-linked policy: the typical yearly change in income, and how often it fell. */
+  incomeAvgIncrease: number | null; incomeDropShare: number | null;
   p5a: number[]; p50a: number[]; p75a: number[]; p95a: number[];
   w5a: number[]; w50a: number[]; w75a: number[]; w95a: number[];
   linPort: number[]; linW: number[];
@@ -592,6 +594,9 @@ export default function App() {
       const path = [val], wpath = [curW];
       const freezeYears = [];
       let skips = 0, incs = 0;
+      // How the income moved year to year, so the policy can be described by what it does to
+      // a client's income rather than only by what it does to the balance.
+      let incSum = 0, incCount = 0, incDrops = 0;
 
       // Running vital-sign accumulators (all cumulative — that is the point of momentum).
       let drawn = 0, drawnReal = 0;   // income actually paid out, nominal and in today's money
@@ -637,7 +642,12 @@ export default function App() {
           // applyRule=false is the comparison run, which always uses the lifestyle rule, so a
           // like-for-like figure exists for whichever policy is selected.
           if (endowOn && drawing && applyRule) {
+            const prevW = curW;
             curW = endowmentNext(curW, val);
+            if (prevW > 0) {
+              const ch = curW / prevW - 1;
+              incSum += ch; incCount++; if (ch < 0) incDrops++;
+            }
             incs++;
           } else if (endowOn && drawing) {
             curW *= (1 + cpi);            // lifestyle at CPI, the policy being compared against
@@ -694,7 +704,8 @@ export default function App() {
       for (let m = 0; m < months; m++) growth *= (1 + monthlyReturns[m]);
       const earned = Math.pow(growth, 1 / years) - 1;
 
-      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned, drawn, drawnReal };
+      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned, drawn, drawnReal,
+        avgIncrease: incCount ? incSum / incCount : 0, dropShare: incCount ? incDrops / incCount : 0 };
     };
 
     // Each path draws independently, so results carry both an uncertain realised
@@ -854,6 +865,7 @@ export default function App() {
     const retBalances: number[] = [];   // balance each path reached at the retirement pivot
     const earneds: number[] = [];       // what the investments earned on each path, before cash flows
     const drawns: number[] = [], drawnReals: number[] = [];   // income paid out on each path
+    let incSumAll = 0, dropSumAll = 0, incPaths = 0;          // how the income moved, across paths
 
     for (let s = 0; s < N; s++) {
       const monthlyReturns = genReturns();
@@ -875,6 +887,7 @@ export default function App() {
 
       finals.push(r.final); paths.push(r.path); wpaths.push(r.wpath); earneds.push(r.earned);
       drawns.push(r.drawn); drawnReals.push(r.drawnReal);
+      if (endowOn) { incSumAll += r.avgIncrease; dropSumAll += r.dropShare; incPaths++; }
       if (twoPhase) retBalances.push(r.balAtRetirement);
     }
 
@@ -1158,6 +1171,8 @@ export default function App() {
       // path: a plan that ran dry early paid out less, so the two distributions differ.
       drawnMedian: drawns.slice().sort((a, b) => a - b)[Math.floor(0.5 * N)],
       drawnMedianReal: drawnReals.slice().sort((a, b) => a - b)[Math.floor(0.5 * N)],
+      incomeAvgIncrease: incPaths ? incSumAll / incPaths : null,
+      incomeDropShare: incPaths ? dropSumAll / incPaths : null,
       p5a, p50a, p75a, p95a, w5a, w50a, w75a, w95a, linPort, linW, dep, real, avgReturn,
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
@@ -1466,13 +1481,13 @@ export default function App() {
         {planMode !== "pre" && (
           <>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Spending policy</div>
-            {segRow([["lifestyle", "Lifestyle"], ["endowment", "Endowment"]], spendPolicy, setSpendPolicy)}
+            {segRow([["lifestyle", "Lifestyle"], ["endowment", "Income Review"]], spendPolicy, setSpendPolicy)}
           </>
         )}
         {planMode !== "pre" && spendPolicy === "endowment" && (
           <div>
             <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
-              Each year's income is <strong>{smoothing}%</strong> of last year's plus <strong>{100 - smoothing}%</strong> of {spendRate.toFixed(1)}% of the portfolio's current value, then increased by inflation. Because part of it follows the portfolio, a falling market eases the income down gradually rather than leaving it to climb regardless.
+              Reviewed every year: <strong>{smoothing}%</strong> of last year's income plus <strong>{100 - smoothing}%</strong> of {spendRate.toFixed(1)}% of the portfolio's current value, then increased by inflation. Because part of it follows the portfolio, a falling market eases the income down gradually rather than leaving it to climb regardless.
             </div>
             {sRow("Spending rate (%/yr)", 2, 10, 0.25, spendRate, setSpendRate, spendRate.toFixed(2) + "% of portfolio", "#D85A30")}
             {sRow("Smoothing (% on last year)", 50, 100, 5, smoothing, setSmoothing, smoothing + "/" + (100 - smoothing), "#185FA5")}
@@ -1923,15 +1938,27 @@ export default function App() {
           return (
             <div style={{ borderTop: "1px solid #eee", background: "#fbfcfe" }}>
               <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
-                {spendPolicy === "endowment" ? "Endowment vs lifestyle" : skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
-                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `freeze increase when below ${g.band}% of expected trajectory AND year's return is negative`}</span>
+                {spendPolicy === "endowment" ? "Income Review rule vs lifestyle" : skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {spendPolicy === "endowment" ? `income reset each year to ${smoothing}% of last year plus ${100 - smoothing}% of ${spendRate.toFixed(1)}% of the portfolio` : skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `freeze increase when below ${g.band}% of expected trajectory AND year's return is negative`}</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 4px 10px" }}>
                 {cell(spendPolicy === "endowment" ? "Success — lifestyle" : skipMode === "health" ? "Success — no rule" : "Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
-                {cell(spendPolicy === "endowment" ? "Success — endowment" : skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
+                {cell(spendPolicy === "endowment" ? "Success — Income Review" : skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
                 {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
-                {cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
-                {cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
+                {spendPolicy !== "endowment" && cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
+                {spendPolicy !== "endowment" && cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
+                {/* What the rule does to the income, which is what a client actually feels.
+                    A freeze count means nothing here: the amount is recalculated every year
+                    rather than held, so the useful figures are how much it typically moved and
+                    how often it went backwards. */}
+                {spendPolicy === "endowment" && results.incomeAvgIncrease !== null &&
+                  cell("Average increase", (results.incomeAvgIncrease * 100).toFixed(1) + "%/yr",
+                       results.incomeAvgIncrease >= inflation / 100 ? "#1D9E75" : "#BA7517",
+                       `inflation is ${inflation.toFixed(1)}%`)}
+                {spendPolicy === "endowment" && results.incomeDropShare !== null &&
+                  cell("Years income fell", Math.round(results.incomeDropShare * 100) + "%",
+                       results.incomeDropShare > 0.25 ? "#D85A30" : "#185FA5",
+                       "the belt-tightening years")}
               </div>
             </div>
           );
