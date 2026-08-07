@@ -1042,6 +1042,10 @@ export default function App() {
       const path = [curW * 12];
       for (let yr = 1; yr <= years; yr++) {
         if (twoPhase && yr * 12 > retireM && curW === 0) curW = incomeAtRetirement(linPort[Math.floor(retireM / 12)] ?? 0);
+        // The income line has to follow the same rule as the balances beside it. Under the
+        // Income Review policy that means recalculating off the portfolio each year, using
+        // the value this same fixed-return path opened the year on.
+        else if (endowOn && (!twoPhase || yr * 12 > retireM)) curW = endowmentNext(curW, linPort[yr - 1] ?? 0);
         else if (!twoPhase || yr * 12 > retireM) {
           const skip = skipMode === "fixed" ? (yr % skipEvery === 0) : false;
           if (!skip && wEsc > 0) curW *= (1 + wEsc);
@@ -2246,6 +2250,65 @@ export default function App() {
             <div style={{ fontSize: 12, fontWeight: 600, color: "#444", marginBottom: 8 }}>Annual income withdrawal</div>
             {legend([[COLORS.p95, "P95 best case", true], [COLORS.p90, "P75 optimistic", true], [COLORS.p50, "P50 median", false], [COLORS.p10, "P5 conservative", true], [COLORS.linear, "Fixed return", true]])}
             <div style={{ position: "relative", height: 200 }}><canvas ref={c2Ref} /></div>
+
+            {/* Year by year on the central projection. The chart shows the income; these are
+                the two figures a review actually turns on — what share of the portfolio is
+                being drawn, and how much the income moved. Read off the fixed-return path so
+                the arithmetic is followable; the percentile bands above carry the spread. */}
+            {(() => {
+              const bal = results?.linPort, inc = results?.linW;
+              if (!bal || !inc || inc.length < 2) return null;
+              const rows = [];
+              for (let y = 1; y <= years; y++) {
+                const opening = bal[y - 1], income = inc[y - 1];
+                if (opening === undefined || income === undefined) break;
+                const prev = y >= 2 ? inc[y - 2] : null;
+                rows.push({
+                  y, opening, income,
+                  rate: opening > 0 ? income / opening * 100 : null,
+                  change: prev && prev > 0 ? (income / prev - 1) * 100 : null,
+                });
+              }
+              return (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#444", marginBottom: 6 }}>
+                    Year by year
+                    <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · on the fixed-return projection</span>
+                  </div>
+                  <div style={{ maxHeight: 240, overflowY: "auto", overflowX: "auto", border: "1px solid #eee", borderRadius: 6 }}>
+                    <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%", minWidth: 330 }}>
+                      <thead>
+                        <tr style={{ color: "#999", background: "#fafafa", position: "sticky", top: 0 }}>
+                          <th style={{ textAlign: "left",  fontWeight: 500, padding: "4px 8px" }}>Year</th>
+                          <th style={{ textAlign: "right", fontWeight: 500, padding: "4px 8px" }}>Opening value</th>
+                          <th style={{ textAlign: "right", fontWeight: 500, padding: "4px 8px" }}>Income</th>
+                          <th style={{ textAlign: "right", fontWeight: 500, padding: "4px 8px" }}>Draw rate</th>
+                          <th style={{ textAlign: "right", fontWeight: 500, padding: "4px 8px" }}>Change</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(r => (
+                          <tr key={r.y} style={{ borderTop: "1px solid #f2f2f2" }}>
+                            <td style={{ padding: "3px 8px", color: "#555" }}>{r.y}</td>
+                            <td style={{ padding: "3px 8px", textAlign: "right", color: "#555" }}>{fmt(r.opening)}</td>
+                            <td style={{ padding: "3px 8px", textAlign: "right", fontWeight: 600, color: "#333" }}>{fmt(r.income)}</td>
+                            <td style={{ padding: "3px 8px", textAlign: "right", fontWeight: 600, color: r.rate === null ? "#bbb" : r.rate > 6 ? "#D85A30" : r.rate > 5 ? "#BA7517" : "#1D9E75" }}>
+                              {r.rate === null ? "—" : r.rate.toFixed(1) + "%"}
+                            </td>
+                            <td style={{ padding: "3px 8px", textAlign: "right", fontWeight: 600, color: r.change === null ? "#bbb" : r.change < 0 ? "#D85A30" : r.change < inflation ? "#BA7517" : "#1D9E75" }}>
+                              {r.change === null ? "—" : (r.change > 0 ? "+" : "") + r.change.toFixed(1) + "%"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{ fontSize: 10, color: "#bbb", marginTop: 5 }}>
+                    Draw rate is the year's income against the value it started from, so it rises when the portfolio falls even if the income never changed. Change is amber below inflation ({inflation.toFixed(1)}%), since income growing slower than prices is losing ground even while the number goes up.
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
