@@ -197,6 +197,13 @@ export default function App() {
   const [fspCode, setFspCode]           = useState("");
   const [adviserCode, setAdviserCode]   = useState("");
 
+  // How the income is set each year. Lifestyle raises it by a fixed rate regardless of how
+  // the portfolio is doing; endowment blends the previous amount with a percentage of the
+  // portfolio's current value, so the income follows the capital instead of ignoring it.
+  const [spendPolicy, setSpendPolicy]   = useState("lifestyle");  // "lifestyle" | "endowment"
+  const [spendRate, setSpendRate]       = useState(5);            // % of portfolio the policy targets
+  const [smoothing, setSmoothing]       = useState(90);           // % weight on last year's amount
+
   const [planMode, setPlanMode]         = useState("post");     // "pre" | "post" | "both"
   const [retireDate, setRetireDate]     = useState("");         // "YYYY-MM"; blank = already drawing
   const [wBasis, setWBasis]             = useState("today");    // "today" | "atRet" | "percent"
@@ -287,6 +294,9 @@ export default function App() {
   // Whether the plan draws at all. On a percentage basis there is no amount entered, so
   // anything gated on the withdrawal figure alone would wrongly hide itself.
   const planDraws = planMode === "pre" ? false
+    // The endowment policy sets the income from its spending rate, so there is no entered
+    // amount to test — checking one would hide the income figures on every endowment plan.
+    : spendPolicy === "endowment" ? spendRate > 0
     : planMode === "both" ? (wBasis === "percent" ? wPct > 0 : withdraw > 0)
     : withdraw > 0;
   const retireLabel = (() => {
@@ -507,10 +517,30 @@ export default function App() {
     //   today   - entered in today's money, carried forward by inflation to the pivot
     //   atRet   - entered as the actual figure drawn on the retirement date, used as given
     //   percent - read off whatever that path accumulated, so it adapts to the balance
+    // The endowment policy sets the opening income itself, as its spending rate applied to the
+    // capital it starts from, so the entered amount and the percentage basis do not apply.
+    const endowOn = spendPolicy === "endowment";
+    const spendR = spendRate / 100;
+    const smoothW = smoothing / 100;
+    const cpi = inflation / 100;
+
     const incomeAtRetirement = (balAtRet: number) =>
-      wBasis === "percent" ? balAtRet * (wPct / 100) / 12
+      endowOn ? balAtRet * spendR / 12
+      : wBasis === "percent" ? balAtRet * (wPct / 100) / 12
       : wBasis === "atRet" ? withdraw
       : withdraw * Math.pow(1 + inflation / 100, retireM / 12);
+
+    /**
+     * Next year's income under the endowment rule: blend last year's amount with the
+     * portfolio's current value at the target rate, then add the cost-of-living increase.
+     * Checked against Thornburg's 1973-76 worked example, which it reproduces to the rand.
+     * Because part of the amount tracks the portfolio, a falling market pulls the income down
+     * gradually rather than leaving it to rise regardless.
+     */
+    const endowmentNext = (priorMonthly: number, pv: number) => {
+      const subtotal = smoothW * (priorMonthly * 12) + (1 - smoothW) * (pv * spendR);
+      return subtotal * (1 + cpi) / 12;
+    };
 
     const lumpMap: Record<number, number> = {};
     lumps.forEach((l: any) => { const k = l.year * 12; lumpMap[k] = (lumpMap[k] || 0) + l.amount; });
@@ -521,18 +551,22 @@ export default function App() {
     // it is the static yardstick the guardrail measures against for the life of the plan.
     const guardOn = skipMode === "guard" && wEsc > 0;
     const healthRuleOn = skipMode === "health" && wEsc > 0;
-    const comparingOn = guardOn || healthRuleOn;   // rules that report a with/without lift
+    // Endowment reports against the lifestyle policy on the same paths, which is the
+    // comparison the approach exists to make.
+    const comparingOn = guardOn || healthRuleOn || endowOn;
     const bandFrac = guardBand / 100;
 
     // Set once calibration has run. Null while calibrating, which is what keeps the health
     // rule from feeding on itself: the odds it consults come from paths that never used it.
     let afrLookup: ((s: VitalSigns) => number | null) | null = null;
     const expectedBalance = (() => {
-      let val = init, curW = twoPhase ? 0 : withdraw, curC = contrib;
+      let val = init, curW = twoPhase ? 0 : (endowOn ? init * spendR / 12 : withdraw), curC = contrib;
       const arr = [val];
       for (let m = 0; m < months; m++) {
         if (m > 0 && m % 12 === 0) {
-          if (wEsc > 0 && (!twoPhase || m > retireM)) curW *= (1 + wEsc);
+          const drawingNow = !twoPhase || m > retireM;
+          if (endowOn && drawingNow) curW = endowmentNext(curW, val);
+          else if (wEsc > 0 && drawingNow) curW *= (1 + wEsc);
           if (cEsc > 0 && (!twoPhase || m <= retireM)) curC *= (1 + cEsc);
         }
         // Same pivot as the simulated paths, so the yardstick stays comparable to them.
@@ -553,7 +587,7 @@ export default function App() {
     const runOnePath = (monthlyReturns: number[], applyRule: boolean, needSigns = false) => {
       // In two-phase mode the income is unknown until the plan reaches retirement, so it
       // starts at zero and is set once, at the pivot, from that path's own balance.
-      let val = init, curW = twoPhase ? 0 : withdraw, curC = contrib, yrStart = init;
+      let val = init, curW = twoPhase ? 0 : (endowOn ? init * spendR / 12 : withdraw), curC = contrib, yrStart = init;
       let balAtRetirement = twoPhase ? 0 : init;
       const path = [val], wpath = [curW];
       const freezeYears = [];
@@ -600,7 +634,15 @@ export default function App() {
           // Escalation belongs to whichever phase the plan is in: contributions grow while
           // working, income grows once drawing. The withdrawal rules only apply in drawdown.
           const drawing = !twoPhase || m > retireM;
-          if (wEsc > 0 && drawing) {
+          // applyRule=false is the comparison run, which always uses the lifestyle rule, so a
+          // like-for-like figure exists for whichever policy is selected.
+          if (endowOn && drawing && applyRule) {
+            curW = endowmentNext(curW, val);
+            incs++;
+          } else if (endowOn && drawing) {
+            curW *= (1 + cpi);            // lifestyle at CPI, the policy being compared against
+            incs++;
+          } else if (wEsc > 0 && drawing) {
             let skip;
             if (skipMode === "guard") {
               // Freeze only when BOTH hold.
@@ -668,8 +710,8 @@ export default function App() {
     // Health diagnostic only means anything once money is coming out.
     // Two-phase plans do draw eventually, so the diagnostic applies to them as well. On a
     // percentage basis the income comes from the balance, so the entered amount is irrelevant.
-    const healthOn = twoPhase
-      ? (wBasis === "percent" ? wPct > 0 : withdraw > 0)
+    const healthOn = endowOn ? spendR > 0
+      : twoPhase ? (wBasis === "percent" ? wPct > 0 : withdraw > 0)
       : withdraw > 0;
 
     // ---- Calibration: what happens to a plan like this if nothing is adjusted ----
@@ -957,12 +999,14 @@ export default function App() {
 
     // Linear portfolio path
     const linPort = (() => {
-      let val = init, curW = twoPhase ? 0 : withdraw, curC = contrib;
+      let val = init, curW = twoPhase ? 0 : (endowOn ? init * spendR / 12 : withdraw), curC = contrib;
       const path = [val];
       for (let m = 0; m < months; m++) {
         if (m > 0 && m % 12 === 0) {
           const yr = m / 12;
-          if (wEsc > 0 && (!twoPhase || m > retireM)) {
+          const drawingNow = !twoPhase || m > retireM;
+          if (endowOn && drawingNow) curW = endowmentNext(curW, val);
+          else if (wEsc > 0 && drawingNow) {
             const skip = skipMode === "fixed" ? (yr % skipEvery === 0) : false;
             if (!skip) curW *= (1 + wEsc);
           }
@@ -981,7 +1025,7 @@ export default function App() {
     const linW = (() => {
       // Reads the income off the fixed-return path so a percentage basis reflects the balance
       // that path actually reaches; nothing is drawn before retirement.
-      let curW = twoPhase ? 0 : withdraw;
+      let curW = twoPhase ? 0 : (endowOn ? init * spendR / 12 : withdraw);
       const path = [curW * 12];
       for (let yr = 1; yr <= years; yr++) {
         if (twoPhase && yr * 12 > retireM && curW === 0) curW = incomeAtRetirement(linPort[Math.floor(retireM / 12)] ?? 0);
@@ -1139,7 +1183,7 @@ export default function App() {
     });
     // healthYear is deliberately NOT a dependency — it only picks which precomputed year
     // the diagnostic displays, so moving it must not trigger another simulation run.
-  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, planMode, effContrib, effWithdrawInput, effRetireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
+  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, spendPolicy, spendRate, smoothing, planMode, effContrib, effWithdrawInput, effRetireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
@@ -1417,6 +1461,29 @@ export default function App() {
 
         {planMode !== "pre" && hr}
         {planMode !== "pre" && secLabel(planMode === "both" ? "Retirement income" : "Withdrawal")}
+        {/* How the income is set each year. Endowment ties part of it to the portfolio's
+            current value, so it eases back in a bad market instead of rising regardless. */}
+        {planMode !== "pre" && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Spending policy</div>
+            {segRow([["lifestyle", "Lifestyle"], ["endowment", "Endowment"]], spendPolicy, setSpendPolicy)}
+          </>
+        )}
+        {planMode !== "pre" && spendPolicy === "endowment" && (
+          <div>
+            <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
+              Each year's income is <strong>{smoothing}%</strong> of last year's plus <strong>{100 - smoothing}%</strong> of {spendRate.toFixed(1)}% of the portfolio's current value, then increased by inflation. Because part of it follows the portfolio, a falling market eases the income down gradually rather than leaving it to climb regardless.
+            </div>
+            {sRow("Spending rate (%/yr)", 2, 10, 0.25, spendRate, setSpendRate, spendRate.toFixed(2) + "% of portfolio", "#D85A30")}
+            {sRow("Smoothing (% on last year)", 50, 100, 5, smoothing, setSmoothing, smoothing + "/" + (100 - smoothing), "#185FA5")}
+            <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 10 }}>
+              Opening income <strong style={{ color: "#D85A30" }}>{fmt(init * spendRate / 100 / 12)}</strong>/mo
+              {planMode === "both" && <> · set from the balance at retirement instead</>}
+              <br />
+              <span style={{ color: "#bbb" }}>Higher smoothing changes the income more slowly. 100 would ignore the portfolio entirely, which is the lifestyle policy.</span>
+            </div>
+          </div>
+        )}
         {/* The retirement date only means anything for a plan that spans both phases. */}
         {planMode === "both" && <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>Retirement date</div>
@@ -1443,7 +1510,7 @@ export default function App() {
             </select>
           </>
         )}
-        {planMode !== "pre" && (effRetireMonths > 0 && wBasis === "percent"
+        {planMode !== "pre" && spendPolicy !== "endowment" && (effRetireMonths > 0 && wBasis === "percent"
           ? sRow("Draw at retirement (%/yr)", 1, 12, 0.25, wPct, setWPct, wPct.toFixed(2) + "% of balance", "#D85A30")
           : sRowN(effRetireMonths === 0 ? "Monthly withdrawal (R)"
                   : wBasis === "atRet" ? "Monthly income at retirement (R)"
@@ -1488,11 +1555,11 @@ export default function App() {
           </div>
         )}
 
-        {planMode !== "pre" && <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Annual withdrawal escalation</div>}
-        {planMode !== "pre" && segRow([["none", "None"], ["custom", "Custom %"]], escMode, setEscMode)}
-        {planMode !== "pre" && escMode === "custom" && sRow("Escalation rate (%)", 0, 20, .5, customEsc, setCustomEsc, customEsc.toFixed(1) + "%", "#D85A30")}
+        {planMode !== "pre" && spendPolicy !== "endowment" && <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Annual withdrawal escalation</div>}
+        {planMode !== "pre" && spendPolicy !== "endowment" && segRow([["none", "None"], ["custom", "Custom %"]], escMode, setEscMode)}
+        {planMode !== "pre" && spendPolicy !== "endowment" && escMode === "custom" && sRow("Escalation rate (%)", 0, 20, .5, customEsc, setCustomEsc, customEsc.toFixed(1) + "%", "#D85A30")}
 
-        {planMode !== "pre" && escMode !== "none" && (
+        {planMode !== "pre" && spendPolicy !== "endowment" && escMode !== "none" && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 6 }}>Skip escalation when</div>
             <select value={skipMode} onChange={e => setSkipMode(e.target.value)}
@@ -1856,12 +1923,12 @@ export default function App() {
           return (
             <div style={{ borderTop: "1px solid #eee", background: "#fbfcfe" }}>
               <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
-                {skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
+                {spendPolicy === "endowment" ? "Endowment vs lifestyle" : skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
                 <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `freeze increase when below ${g.band}% of expected trajectory AND year's return is negative`}</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 4px 10px" }}>
-                {cell(skipMode === "health" ? "Success — no rule" : "Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
-                {cell(skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
+                {cell(spendPolicy === "endowment" ? "Success — lifestyle" : skipMode === "health" ? "Success — no rule" : "Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
+                {cell(spendPolicy === "endowment" ? "Success — endowment" : skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
                 {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
                 {cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
                 {cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
