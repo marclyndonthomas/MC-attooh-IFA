@@ -27,6 +27,25 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   third adapts to the balance. An "At retirement" panel reports the balance handed over.
 
   Horizon runs to 70 years to fit both phases.
+- **Clients tab** — nominate a folder once (one inside OneDrive works well) and the tab lists every
+  plan in it, most recently saved first, with a click to open. *Save plan* then writes straight into
+  that folder, and *+ New client* clears the form while keeping the adviser and FSP details, since
+  re-typing those invites a wrong code.
+
+  The browser holds only a handle to the folder, kept in IndexedDB — never the client details, which
+  stay in ordinary files that OneDrive backs up, that can be sent to an adviser, and that are deleted
+  by deleting the file. An open plan is written back to the file it came from, so renaming a client
+  updates the record rather than leaving a second copy under the new name; the list shows the name
+  from inside each file for the same reason. Files that are not plans are ignored rather than guessed at.
+
+  The folder permission does not always survive a reload and can only be re-granted from a click, so
+  a lapsed one shows a *Reconnect* prompt — otherwise it would be indistinguishable from an empty folder.
+
+  Needs the File System Access API (Chrome/Edge). Elsewhere the tab is hidden entirely and the
+  save/open buttons below carry on as before, so nothing breaks for an adviser on another browser.
+
+  It is a way to find and reopen a plan quickly, **not a system of record**: no search across clients,
+  no history of changes, and if two people open the same file from a shared folder the last save wins.
 - **Save / open a plan.** *Save plan* writes every input — client and adviser details, portfolio,
   policy, fees, injections and entered history — to a `<client>-plan.json` file; *Open plan* reads
   it back. That is the only persistence: nothing is written to browser storage, so a client's ID

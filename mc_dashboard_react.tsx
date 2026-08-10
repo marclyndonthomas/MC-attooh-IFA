@@ -261,32 +261,40 @@ export default function App() {
 
   const PLAN_FORMAT = 1;
 
-  /** Write the plan out as a file the adviser keeps with the client's records. */
-  const savePlan = () => {
+  // The values the fields start on, captured on the first render so "new client" has something
+  // to reset to. Taken from the registry rather than written out a second time, so a default
+  // changed at the useState above cannot drift from the one used here.
+  const defaultsRef = useRef<Record<string, any> | null>(null);
+  if (!defaultsRef.current) {
+    const d: Record<string, any> = {};
+    Object.entries(PLAN).forEach(([k, [v]]) => { d[k] = v; });
+    defaultsRef.current = d;
+  }
+
+  const planJson = () => {
     const fields: Record<string, any> = {};
     Object.entries(PLAN).forEach(([k, [v]]) => { fields[k] = v; });
-    const blob = new Blob([JSON.stringify({ format: PLAN_FORMAT, saved: new Date().toISOString(), fields }, null, 2)],
-      { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = ((clientName || "").replace(/[^\w -]/g, "").trim().replace(/\s+/g, "-") || "client") + "-plan.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-    setPlanNote("Saved " + a.download);
+    return JSON.stringify({ format: PLAN_FORMAT, saved: new Date().toISOString(), fields }, null, 2);
   };
 
-  /** Read a saved plan back. Anything unrecognised is reported, never silently applied. */
-  const loadPlan = (file: File) => {
-    const r = new FileReader();
-    r.onload = () => {
-      let data: any;
-      try { data = JSON.parse(String(r.result)); } catch { setPlanNote("That file is not a saved plan."); return; }
-      if (!data || typeof data !== "object" || !data.fields || typeof data.fields !== "object") {
-        setPlanNote("That file is not a saved plan."); return;
-      }
-      if (typeof data.format === "number" && data.format > PLAN_FORMAT) {
-        setPlanNote("That plan was saved by a newer version of this tool."); return;
-      }
+  /** File name for a client, from their name. Falls back so an unnamed plan still saves. */
+  const planFileName = () =>
+    ((clientName || "").replace(/[^\w -]/g, "").trim().replace(/\s+/g, "-") || "client") + "-plan.json";
+
+  /**
+   * Apply a plan's text to the dashboard. Anything unrecognised is reported, never silently
+   * applied. Returns whether it took, so callers know if there is now an open plan.
+   */
+  const applyPlanText = (txt: string): boolean => {
+    let data: any;
+    try { data = JSON.parse(txt); } catch { setPlanNote("That file is not a saved plan."); return false; }
+    if (!data || typeof data !== "object" || !data.fields || typeof data.fields !== "object") {
+      setPlanNote("That file is not a saved plan."); return false;
+    }
+    if (typeof data.format === "number" && data.format > PLAN_FORMAT) {
+      setPlanNote("That plan was saved by a newer version of this tool."); return false;
+    }
+    try {
       // Apply only known fields, and only where the type matches what the field holds now, so a
       // hand-edited or truncated file cannot put the dashboard into a state the UI cannot render.
       let applied = 0; const skipped: string[] = [];
@@ -309,6 +317,161 @@ export default function App() {
       setPlanNote(applied === 0 ? "Nothing in that file could be read."
         : "Loaded " + applied + " settings" + (skipped.length ? ", ignored " + skipped.length + " that did not fit" : "")
           + ". Run the simulation to see results.");
+      return applied > 0;
+    } catch { setPlanNote("That file could not be read as a plan."); return false; }
+  };
+
+  // ---------------------------------------------------------------------------------------
+  // Client folder. Plans live as files in a folder the adviser nominates; the browser holds
+  // only a handle to that folder, never the client details themselves. So the files stay
+  // backed up and shareable wherever they were put, and nothing accumulates in browser storage.
+  // Needs the File System Access API — elsewhere the save/open buttons carry on as before.
+  // ---------------------------------------------------------------------------------------
+  const FS_OK = typeof (window as any).showDirectoryPicker === "function";
+  const [dirHandle, setDirHandle] = useState<any>(null);
+  const [dirName, setDirName]     = useState("");
+  const [dirBlocked, setDirBlocked] = useState(false);   // remembered, but permission not yet re-granted
+  const [clientList, setClientList] = useState<{ label: string; file: string; saved: number; handle: any }[]>([]);
+  const [listBusy, setListBusy]   = useState(false);
+  const [curFile, setCurFile]     = useState<any>(null); // the file the open plan came from, so Save overwrites it
+  const [tab, setTab]             = useState<"sim" | "clients">("sim");
+
+  // A directory handle survives a reload, but the permission behind it does not always, and it
+  // can only be re-granted from a click. Keep the handle in IndexedDB and ask on the next gesture.
+  const idbDir = (v?: any) => new Promise<any>(res => {
+    let req: IDBOpenDBRequest;
+    try { req = indexedDB.open("mcPlanStore", 1); } catch { res(null); return; }
+    req.onupgradeneeded = () => req.result.createObjectStore("kv");
+    req.onerror = () => res(null);
+    req.onsuccess = () => {
+      try {
+        const tx = req.result.transaction("kv", v === undefined ? "readonly" : "readwrite");
+        const st = tx.objectStore("kv");
+        if (v === undefined) { const g = st.get("dir"); g.onsuccess = () => res(g.result || null); g.onerror = () => res(null); }
+        else { st.put(v, "dir"); tx.oncomplete = () => res(true); tx.onerror = () => res(null); }
+      } catch { res(null); }
+    };
+  });
+
+  /** Read the folder and list the plans in it. Files that are not plans are left out, not guessed at. */
+  const listClients = async (h: any) => {
+    setListBusy(true);
+    const out: { label: string; file: string; saved: number; handle: any }[] = [];
+    try {
+      for await (const [name, handle] of (h as any).entries()) {
+        if (handle.kind !== "file" || !/\.json$/i.test(name)) continue;
+        try {
+          const f = await handle.getFile();
+          const d = JSON.parse(await f.text());
+          if (!d || !d.fields) continue;
+          out.push({ label: d.fields.clientName || name.replace(/\.json$/i, ""), file: name, saved: f.lastModified, handle });
+        } catch { /* unreadable, or not one of ours — skip rather than show a broken row */ }
+      }
+      setDirBlocked(false);
+    } catch {
+      setDirBlocked(true);   // usually the permission lapsed rather than the folder vanishing
+    }
+    out.sort((a, b) => b.saved - a.saved);
+    setClientList(out); setListBusy(false);
+  };
+
+  const ensureDirAccess = async (h: any) => {
+    try {
+      if (await h.queryPermission({ mode: "readwrite" }) === "granted") return true;
+      return await h.requestPermission({ mode: "readwrite" }) === "granted";
+    } catch { return false; }
+  };
+
+  const pickFolder = async () => {
+    try {
+      const h = await (window as any).showDirectoryPicker({ mode: "readwrite" });
+      await idbDir(h);
+      setDirHandle(h); setDirName(h.name); setDirBlocked(false);
+      listClients(h);
+      setPlanNote(null);
+    } catch { /* the picker was dismissed */ }
+  };
+
+  const reconnectFolder = async () => {
+    if (!dirHandle) return;
+    if (await ensureDirAccess(dirHandle)) listClients(dirHandle);
+    else setPlanNote("Access to that folder was not granted.");
+  };
+
+  const forgetFolder = async () => {
+    await idbDir(null);
+    setDirHandle(null); setDirName(""); setClientList([]); setCurFile(null); setDirBlocked(false);
+    setPlanNote("Folder forgotten. The files themselves are untouched.");
+  };
+
+  // Restore the nominated folder on load. Only list straight away if the permission is still
+  // live; otherwise show a reconnect button, since asking again needs a click.
+  useEffect(() => {
+    if (!FS_OK) return;
+    (async () => {
+      const h = await idbDir();
+      if (!h) return;
+      setDirHandle(h); setDirName(h.name);
+      try {
+        if (await h.queryPermission({ mode: "readwrite" }) === "granted") listClients(h);
+        else setDirBlocked(true);
+      } catch { setDirBlocked(true); }
+    })();
+  }, []);
+
+  const openClient = async (e: { handle: any; label: string }) => {
+    try {
+      const f = await e.handle.getFile();
+      if (applyPlanText(await f.text())) { setCurFile(e.handle); setTab("sim"); }
+    } catch { setPlanNote("That plan could not be opened."); }
+  };
+
+  /**
+   * Clear the plan back to its defaults. Adviser and practice details are kept, since the next
+   * client is almost always the same adviser's and re-typing them invites a wrong FSP code.
+   */
+  const newClient = () => {
+    const keep = new Set(["fspPractice", "fspCode", "adviserName", "adviserCode"]);
+    const d = defaultsRef.current!;
+    Object.entries(PLAN).forEach(([k, [, set]]) => { if (!keep.has(k) && k in d) set(d[k]); });
+    setResults(null); setSolved(null); setCurFile(null); setTab("sim");
+    setPlanNote("Started a new client. Adviser details kept. Save to add them to the folder.");
+  };
+
+  const downloadPlan = (txt: string) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([txt], { type: "application/json" }));
+    a.download = planFileName();
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setPlanNote("Saved " + a.download);
+  };
+
+  /**
+   * Save to the nominated folder when there is one, otherwise fall back to a download.
+   * An open plan is written back to the file it came from, so renaming a client updates the
+   * record rather than leaving a second copy behind under the new name.
+   */
+  const savePlan = async () => {
+    const txt = planJson();
+    if (!dirHandle) { downloadPlan(txt); return; }
+    if (!await ensureDirAccess(dirHandle)) { setPlanNote("Access to the client folder was not granted."); return; }
+    try {
+      const fh = curFile || await dirHandle.getFileHandle(planFileName(), { create: true });
+      const w = await fh.createWritable();
+      await w.write(txt); await w.close();
+      setCurFile(fh);
+      setPlanNote("Saved to " + dirName + " · " + fh.name);
+      listClients(dirHandle);
+    } catch { setPlanNote("Could not write to the client folder."); }
+  };
+
+  /** Open a plan the user picked by hand, from anywhere on disk. */
+  const loadPlan = (file: File) => {
+    const r = new FileReader();
+    r.onload = () => {
+      // Came from outside the folder, so there is no file to write back to until the next save.
+      if (applyPlanText(String(r.result))) setCurFile(null);
     };
     // A throw inside onload is swallowed by the FileReader, which would leave the dashboard
     // half-loaded and the note still showing whatever it said before. Say so instead.
@@ -1591,7 +1754,11 @@ export default function App() {
             }} />
         </div>
         {planNote && <div style={{ fontSize: 10, color: "#888", marginBottom: 10 }}>{planNote}</div>}
-        {!planNote && <div style={{ fontSize: 10, color: "#ccc", marginBottom: 10 }}>Saves every input below to a file, including the client's details. Nothing is kept when this page closes.</div>}
+        {!planNote && <div style={{ fontSize: 10, color: "#ccc", marginBottom: 10 }}>
+          {dirName
+            ? <>Saves to <strong style={{ color: "#aaa" }}>{dirName}</strong>{curFile ? <> · editing {curFile.name}</> : <> · will create {planFileName()}</>}</>
+            : <>Saves every input below to a file, including the client's details. Nothing is kept when this page closes.</>}
+        </div>}
 
         {/* Record details. These identify the report; none of them reach the simulation. */}
         {secLabel("Client")}
@@ -1987,6 +2154,98 @@ export default function App() {
 
       {/* MAIN */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflowY: "auto" }}>
+
+        {/* Only worth a tab bar where the folder exists to browse — elsewhere the sidebar's
+            save/open buttons are the whole story and a dead tab would just puzzle people. */}
+        {FS_OK && (
+          <div style={{ display: "flex", gap: 2, padding: "6px 16px 0", borderBottom: "1px solid #eee" }}>
+            {([["sim", "Simulator"], ["clients", "Clients"]] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setTab(k)}
+                style={{ padding: "6px 14px", fontSize: 12, fontWeight: tab === k ? 700 : 500, cursor: "pointer",
+                  border: "none", background: "none", color: tab === k ? "#185FA5" : "#888",
+                  borderBottom: tab === k ? "2px solid #185FA5" : "2px solid transparent" }}>
+                {label}{k === "clients" && clientList.length > 0 ? " (" + clientList.length + ")" : ""}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {FS_OK && tab === "clients" && (
+          <div style={{ padding: "14px 16px" }}>
+            {!dirHandle ? (
+              <div style={{ maxWidth: 520 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Choose a folder for client plans</div>
+                <div style={{ fontSize: 12, color: "#666", lineHeight: 1.55, marginBottom: 12 }}>
+                  Pick a folder — one inside OneDrive works well — and every plan saved here goes into it.
+                  This list then shows what is in that folder. The plans stay ordinary files you can back up,
+                  send to an adviser or delete; only a pointer to the folder is remembered, never the client details.
+                </div>
+                <button onClick={pickFolder}
+                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 600, borderRadius: 6, border: "1px solid #185FA5", background: "#185FA5", color: "#fff", cursor: "pointer" }}>
+                  Choose folder
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+                  <div style={{ fontSize: 12, color: "#666" }}>
+                    Folder: <strong style={{ color: "#333" }}>{dirName}</strong>
+                    {listBusy && <span style={{ color: "#bbb" }}> · reading…</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={newClient} style={{ padding: "5px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #1D9E75", background: "#fff", color: "#1D9E75", cursor: "pointer" }}>+ New client</button>
+                    <button onClick={() => listClients(dirHandle)} style={{ padding: "5px 12px", fontSize: 11, borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#666", cursor: "pointer" }}>Refresh</button>
+                    <button onClick={pickFolder} style={{ padding: "5px 12px", fontSize: 11, borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#666", cursor: "pointer" }}>Change folder</button>
+                    <button onClick={forgetFolder} style={{ padding: "5px 12px", fontSize: 11, borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#999", cursor: "pointer" }}>Forget</button>
+                  </div>
+                </div>
+
+                {/* A lapsed permission looks exactly like an empty folder unless it is said out loud. */}
+                {dirBlocked ? (
+                  <div style={{ fontSize: 12, color: "#666", background: "#fdf6ec", border: "1px solid #f0d9b5", borderRadius: 8, padding: "12px 14px" }}>
+                    The browser needs permission to read <strong>{dirName}</strong> again — it asks once per session.
+                    <button onClick={reconnectFolder} style={{ marginLeft: 10, padding: "4px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #D85A30", background: "#fff", color: "#D85A30", cursor: "pointer" }}>Reconnect</button>
+                  </div>
+                ) : clientList.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#999", padding: "18px 0" }}>
+                    {listBusy ? "Reading the folder…" : <>No plans in this folder yet. Fill in a client on the Simulator tab and press <strong>Save plan</strong>.</>}
+                  </div>
+                ) : (
+                  <div style={{ border: "1px solid #eee", borderRadius: 8, overflow: "hidden" }}>
+                    {clientList.map((c, i) => (
+                      <div key={c.file}
+                        onClick={() => openClient(c)}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                          padding: "10px 14px", cursor: "pointer",
+                          borderTop: i ? "1px solid #f0f0f0" : "none",
+                          background: curFile && curFile.name === c.file ? "#f0f6fd" : "#fff" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "#222", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {c.label}
+                            {curFile && curFile.name === c.file && <span style={{ fontSize: 10, fontWeight: 600, color: "#185FA5", marginLeft: 8 }}>OPEN</span>}
+                          </div>
+                          <div style={{ fontSize: 10, color: "#bbb", marginTop: 1 }}>{c.file}</div>
+                        </div>
+                        <div style={{ fontSize: 11, color: "#888", whiteSpace: "nowrap" }}>
+                          {new Date(c.saved).toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric" })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ fontSize: 10, color: "#ccc", marginTop: 10, lineHeight: 1.6, maxWidth: 620 }}>
+                  The name shown is the one inside each plan, so renaming a client on the Simulator tab updates
+                  this list without leaving a second file behind. To remove a client, delete the file in the folder.
+                  This is a way to find and reopen a plan quickly, not a system of record — there is no history of
+                  changes, and if two people have the same file open from a shared folder the last save wins.
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* display:contents keeps the existing layout untouched while the Clients tab is up. */}
+        <div style={{ display: tab === "sim" || !FS_OK ? "contents" : "none" }}>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #eee" }}>
           <div>
@@ -2554,6 +2813,7 @@ export default function App() {
             {planDraws && results.pctRuined > 0 && <span style={{ color: results.pctRuined > 20 ? "#D85A30" : "#888" }}>Depleted: <strong>{results.pctRuined}%</strong></span>}
           </div>
         )}
+        </div>
       </div>
     </div>
   );
