@@ -27,6 +27,18 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   third adapts to the balance. An "At retirement" panel reports the balance handed over.
 
   Horizon runs to 70 years to fit both phases.
+- **Save / open a plan.** *Save plan* writes every input — client and adviser details, portfolio,
+  policy, fees, injections and entered history — to a `<client>-plan.json` file; *Open plan* reads
+  it back. That is the only persistence: nothing is written to browser storage, so a client's ID
+  number and date of birth do not accumulate on a machine that may be shared, and the adviser
+  chooses where the file is filed. The trade-off is that closing the page without saving loses
+  the work.
+
+  Loading applies only fields the tool knows, and only where the type matches the field, so a
+  hand-edited or truncated file is reported rather than half-applied — the note says how many
+  settings were taken and how many were ignored. Results and the solved rate are cleared on load,
+  since they belong to the inputs being replaced. Derived values are never written to the file;
+  they are recomputed, and storing them would let a stale figure outlive its inputs.
 - **Contributions** with optional annual escalation (%/yr).
 - **Withdrawals** with optional annual escalation, and rules to *skip* an escalation in a given year:
   - never, only in years with a negative portfolio return, on a fixed cadence (e.g. every 3rd year),

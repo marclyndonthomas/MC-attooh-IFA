@@ -230,6 +230,93 @@ export default function App() {
   const c1Ref = useRef<HTMLCanvasElement | null>(null); const c1Inst = useRef<any>(null);
   const c2Ref = useRef<HTMLCanvasElement | null>(null); const c2Inst = useRef<any>(null);
   const c3Ref = useRef<HTMLCanvasElement | null>(null); const c3Inst = useRef<any>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [planNote, setPlanNote] = useState<string | null>(null);
+
+  /**
+   * Everything that makes up a client's plan, as a name -> [value, setter] registry.
+   * Kept as one list so saving and loading cannot drift apart — a field added here is written
+   * and read back with no second place to update. Derived values (otherFees, retireMonths) and
+   * results are deliberately absent: they are recomputed from the above, and storing them would
+   * let a stale figure outlive the inputs that produced it.
+   */
+  const PLAN: Record<string, [any, (v: any) => void]> = {
+    init: [init, setInit], contrib: [contrib, setContrib], contribEsc: [contribEsc, setContribEsc],
+    withdraw: [withdraw, setWithdraw], escMode: [escMode, setEscMode], customEsc: [customEsc, setCustomEsc],
+    skipMode: [skipMode, setSkipMode], skipEvery: [skipEvery, setSkipEvery], guardBand: [guardBand, setGuardBand],
+    healthYear: [healthYear, setHealthYear], healthThreshold: [healthThreshold, setHealthThreshold],
+    savingsTarget: [savingsTarget, setSavingsTarget],
+    bucket1Years: [bucket1Years, setBucket1Years], bucket2Years: [bucket2Years, setBucket2Years],
+    clientName: [clientName, setClientName], clientId: [clientId, setClientId], clientDob: [clientDob, setClientDob],
+    dobTouched: [dobTouched, setDobTouched], adviserName: [adviserName, setAdviserName],
+    fspPractice: [fspPractice, setFspPractice], fspCode: [fspCode, setFspCode], adviserCode: [adviserCode, setAdviserCode],
+    spendPolicy: [spendPolicy, setSpendPolicy], spendRate: [spendRate, setSpendRate], smoothing: [smoothing, setSmoothing],
+    solveConf: [solveConf, setSolveConf], planMode: [planMode, setPlanMode], retireDate: [retireDate, setRetireDate],
+    wBasis: [wBasis, setWBasis], wPct: [wPct, setWPct],
+    ret: [ret, setRet], vol: [vol, setVol], years: [years, setYears], sims: [sims, setSims],
+    inflation: [inflation, setInflation], adviceFee: [adviceFee, setAdviceFee], platformFee: [platformFee, setPlatformFee],
+    modelRange: [modelRange, setModelRange], modelKey: [modelKey, setModelKey],
+    lumps: [lumps, setLumps], actuals: [actuals, setActuals],
+  };
+
+  const PLAN_FORMAT = 1;
+
+  /** Write the plan out as a file the adviser keeps with the client's records. */
+  const savePlan = () => {
+    const fields: Record<string, any> = {};
+    Object.entries(PLAN).forEach(([k, [v]]) => { fields[k] = v; });
+    const blob = new Blob([JSON.stringify({ format: PLAN_FORMAT, saved: new Date().toISOString(), fields }, null, 2)],
+      { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = ((clientName || "").replace(/[^\w -]/g, "").trim().replace(/\s+/g, "-") || "client") + "-plan.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setPlanNote("Saved " + a.download);
+  };
+
+  /** Read a saved plan back. Anything unrecognised is reported, never silently applied. */
+  const loadPlan = (file: File) => {
+    const r = new FileReader();
+    r.onload = () => {
+      let data: any;
+      try { data = JSON.parse(String(r.result)); } catch { setPlanNote("That file is not a saved plan."); return; }
+      if (!data || typeof data !== "object" || !data.fields || typeof data.fields !== "object") {
+        setPlanNote("That file is not a saved plan."); return;
+      }
+      if (typeof data.format === "number" && data.format > PLAN_FORMAT) {
+        setPlanNote("That plan was saved by a newer version of this tool."); return;
+      }
+      // Apply only known fields, and only where the type matches what the field holds now, so a
+      // hand-edited or truncated file cannot put the dashboard into a state the UI cannot render.
+      let applied = 0; const skipped: string[] = [];
+      Object.entries(PLAN).forEach(([k, [cur, set]]) => {
+        if (!(k in data.fields)) return;
+        const v = data.fields[k];
+        const fits = Array.isArray(cur) ? Array.isArray(v) : v !== null && typeof v === typeof cur;
+        if (fits) { set(v); applied++; } else skipped.push(k);
+      });
+      // Lumps and history carry ids from the session that saved them; move the counter past
+      // them so a row added after loading cannot collide with one that came out of the file.
+      // Re-check these are arrays: a field that failed the type gate above was skipped, not
+      // removed, so the raw value here can still be anything the file happened to contain.
+      const rows = (k: string) => Array.isArray(data.fields[k]) ? data.fields[k] : [];
+      const ids = [...rows("lumps"), ...rows("actuals")]
+        .map((x: any) => x && x.id).filter((n: any) => typeof n === "number");
+      if (ids.length) uid = Math.max(uid, Math.max(...ids) + 1);
+      // The results on screen belong to the inputs that have just been replaced.
+      setResults(null); setSolved(null);
+      setPlanNote(applied === 0 ? "Nothing in that file could be read."
+        : "Loaded " + applied + " settings" + (skipped.length ? ", ignored " + skipped.length + " that did not fit" : "")
+          + ". Run the simulation to see results.");
+    };
+    // A throw inside onload is swallowed by the FileReader, which would leave the dashboard
+    // half-loaded and the note still showing whatever it said before. Say so instead.
+    const apply = r.onload as any;
+    r.onload = (e: any) => { try { apply(e); } catch { setPlanNote("That file could not be read as a plan."); } };
+    r.onerror = () => setPlanNote("That file could not be read.");
+    r.readAsText(file);
+  };
 
   useEffect(() => {
     const s = document.createElement("script");
@@ -1483,6 +1570,28 @@ export default function App() {
       {/* SIDEBAR */}
       <div style={{ width: 256, minWidth: 256, background: "#f8f8f6", borderRight: "1px solid #e0e0e0", padding: "14px 13px", overflowY: "auto", maxHeight: "90vh", flexShrink: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#333", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #e0e0e0" }}>⚙ Parameters</div>
+
+        {/* Saving to a file rather than the browser is deliberate: the adviser chooses where a
+            client's details live and can file them with the rest of the record, instead of them
+            accumulating in browser storage on a machine that may be shared. */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <button onClick={savePlan}
+            style={{ flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", cursor: "pointer" }}>
+            Save plan
+          </button>
+          <button onClick={() => fileRef.current?.click()}
+            style={{ flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", cursor: "pointer" }}>
+            Open plan
+          </button>
+          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
+            onChange={e => {
+              const f = e.target.files && e.target.files[0];
+              if (f) loadPlan(f);
+              e.target.value = "";   // so re-opening the same file still fires
+            }} />
+        </div>
+        {planNote && <div style={{ fontSize: 10, color: "#888", marginBottom: 10 }}>{planNote}</div>}
+        {!planNote && <div style={{ fontSize: 10, color: "#ccc", marginBottom: 10 }}>Saves every input below to a file, including the client's details. Nothing is kept when this page closes.</div>}
 
         {/* Record details. These identify the report; none of them reach the simulation. */}
         {secLabel("Client")}
