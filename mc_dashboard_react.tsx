@@ -206,7 +206,8 @@ export default function App() {
   const [spendRate, setSpendRate]       = useState(5);            // % of portfolio the policy targets
   const [smoothing, setSmoothing]       = useState(90);           // % weight on last year's amount
   const [solveConf, setSolveConf]       = useState(90);           // confidence the solver aims at
-  const [solved, setSolved]             = useState<{ rate: number; conf: number; years: number; capped: string | null } | null>(null);
+  const [solved, setSolved]             = useState<{ rate: number; conf: number; years: number; capped: string | null;
+                                                     base: number; atRet: boolean } | null>(null);
 
   const [planMode, setPlanMode]         = useState("post");     // "pre" | "post" | "both"
   const [retireDate, setRetireDate]     = useState("");         // "YYYY-MM"; blank = already drawing
@@ -506,9 +507,11 @@ export default function App() {
    * it looks: it makes success a smooth, strictly falling function of the rate, so the search
    * converges on a real answer instead of chasing sampling noise between iterations.
    *
-   * Deliberately narrow — it models a drawdown under the Income Review rule and nothing else.
-   * Contributions, injections and the retirement pivot are ignored, so it is only offered for
-   * a plan that is already drawing.
+   * Handles a plan already drawing and a plan running through retirement. In the latter case
+   * the saving phase is stepped once per path and its closing balance kept, because nothing in
+   * it depends on the target rate — only the drawdown is replayed per candidate. That keeps the
+   * search the same cost as the drawing-only case however long the saving phase is, and it also
+   * means each path's opening income is read off the balance that path actually reached.
    */
   const solveTargetRate = () => {
     const months = years * 12;
@@ -516,18 +519,36 @@ export default function App() {
     const sigL = vol / 100 / Math.sqrt(12);
     const cpiL = inflation / 100;
     const wL = smoothing / 100;
+    const cEscL = contribEsc / 100;
     const PATHS = Math.min(sims, 2000);
 
-    const paths: number[][] = Array.from({ length: PATHS }, () =>
-      Array.from({ length: months }, () => muL + sigL * randn()));
+    // Same pivot the engine uses, so the answer lines up with what a run will show.
+    const retM = planMode === "both" ? Math.min(effRetireMonths, months) : 0;
+    const c0 = effContrib;
+    const lumpL: Record<number, number> = {};
+    lumps.forEach((l: any) => { const k = l.year * 12; lumpL[k] = (lumpL[k] || 0) + l.amount; });
+
+    // Draw the paths ONCE, and with them the saving phase, which the target rate cannot touch.
+    const prepared = Array.from({ length: PATHS }, () => {
+      const mr = Array.from({ length: months }, () => muL + sigL * randn());
+      let val = init, curC = c0;
+      for (let m = 0; m < retM; m++) {
+        if (m > 0 && m % 12 === 0 && cEscL > 0) curC *= (1 + cEscL);
+        if (lumpL[m]) val += lumpL[m];
+        val = val * (1 + mr[m]) + curC;
+        if (val < 0) val = 0;
+      }
+      return { mr, bal: val };
+    });
 
     const successAt = (rate: number) => {
       let ok = 0;
-      for (const mr of paths) {
-        let val = init, curW = init * rate / 12;
-        for (let m = 0; m < months; m++) {
-          if (m > 0 && m % 12 === 0) curW = (wL * (curW * 12) + (1 - wL) * (val * rate)) * (1 + cpiL) / 12;
-          const gross = val * (1 + mr[m]);
+      for (const p of prepared) {
+        let val = p.bal, curW = val * rate / 12;
+        for (let m = retM; m < months; m++) {
+          if (m > retM && m % 12 === 0) curW = (wL * (curW * 12) + (1 - wL) * (val * rate)) * (1 + cpiL) / 12;
+          if (lumpL[m]) val += lumpL[m];
+          const gross = val * (1 + p.mr[m]);
           const taken = Math.min(curW, Math.max(0, gross));
           val = gross - taken;
         }
@@ -536,17 +557,23 @@ export default function App() {
       return ok / PATHS;
     };
 
+    // The capital the opening income is read off. Every path retires on its own balance, so
+    // quote the middle one rather than implying a single figure applies to all of them.
+    const bals = prepared.map(p => p.bal).sort((a, b) => a - b);
+    const base = bals[Math.floor(bals.length / 2)];
+    const stamp = { conf: solveConf, years, base, atRet: retM > 0 };
+
     const want = solveConf / 100;
     const LO = 0.005, HI = 0.25;
     // Say so when the answer runs off either end rather than reporting the boundary as a result.
-    if (successAt(HI) >= want) { setSolved({ rate: HI, conf: solveConf, years, capped: "above" }); return; }
-    if (successAt(LO) < want)  { setSolved({ rate: LO, conf: solveConf, years, capped: "below" }); return; }
+    if (successAt(HI) >= want) { setSolved({ ...stamp, rate: HI, capped: "above" }); return; }
+    if (successAt(LO) < want)  { setSolved({ ...stamp, rate: LO, capped: "below" }); return; }
     let lo = LO, hi = HI;
     for (let i = 0; i < 16; i++) {
       const mid = (lo + hi) / 2;
       if (successAt(mid) >= want) lo = mid; else hi = mid;
     }
-    setSolved({ rate: lo, conf: solveConf, years, capped: null });
+    setSolved({ ...stamp, rate: lo, capped: null });
   };
 
   const runSim = useCallback(() => {
@@ -1549,9 +1576,9 @@ export default function App() {
             {sRow("Spending rate (%/yr)", 2, 10, 0.25, spendRate, setSpendRate, spendRate.toFixed(2) + "% of portfolio", "#D85A30")}
             {sRow("Smoothing (% on last year)", 50, 100, 5, smoothing, setSmoothing, smoothing + "/" + (100 - smoothing), "#185FA5")}
 
-            {/* Work the question backwards: pick the confidence, get the rate. Only offered on
-                a plan that is already drawing, since that is all the solver models. */}
-            {planMode === "post" && (
+            {/* Work the question backwards: pick the confidence, get the rate. Needs a drawing
+                phase to solve for, so it sits out a saving-only plan. */}
+            {(planMode === "post" || (planMode === "both" && effRetireMonths > 0)) && (
               <div style={{ border: "1px solid #c5dcf5", background: "#f7fbff", borderRadius: 6, padding: "8px 9px", marginBottom: 10 }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: "#185FA5", marginBottom: 6 }}>What rate can this portfolio carry?</div>
                 {sRow("Confidence wanted", 50, 99, 1, solveConf, setSolveConf, solveConf + "%", "#185FA5")}
@@ -1569,10 +1596,14 @@ export default function App() {
                           <strong style={{ color: "#185FA5", fontSize: 13 }}>{(solved.rate * 100).toFixed(1)}%</strong>
                           {" "}for {solved.conf}% confidence over {solved.years} yrs
                           <br />
-                          <span style={{ color: "#888" }}>about {fmt(init * solved.rate / 12)}/mo to start</span>
+                          <span style={{ color: "#888" }}>
+                            about {fmt(solved.base * solved.rate / 12)}/mo to start
+                            {solved.atRet && <> — off the middle balance at retirement, {fmt(solved.base)}. Each path draws on its own, so a weaker one opens lower.</>}
+                          </span>
                         </>}
                     <div style={{ fontSize: 10, color: "#bbb", marginTop: 4 }}>
                       Good to about a tenth of a percent — it is read off sampled paths, so a re-run will not land on exactly the same figure. It also moves with every other assumption here, return, volatility, inflation and fees, so it is not a portable number. Set the horizon to a cautious life expectancy rather than an average one, or this quietly becomes "older clients can draw more".
+                      {solved.atRet && <> The rate is applied to the balance each path reaches, so it is judged over the {solved.years - Math.round(effRetireMonths / 12)} drawing years, not the full {solved.years}.</>}
                     </div>
                     {Math.abs(solved.rate * 100 - spendRate) > 0.05 && (
                       <button onClick={() => setSpendRate(Math.round(solved.rate * 1000) / 10)}
