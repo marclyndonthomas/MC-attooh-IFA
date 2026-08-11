@@ -438,6 +438,18 @@ export default function App() {
     setPlanNote("Started a new client. Adviser details kept. Save to add them to the folder.");
   };
 
+  /**
+   * The report is the results panel with the controls dropped and the assumptions added, so it
+   * needs the Simulator tab up and a run behind it. Print is handed to the browser, whose
+   * "Save as PDF" destination produces the file — no PDF library, and it picks up the user's
+   * own paper size and margins.
+   */
+  const printReport = () => {
+    setTab("sim");
+    // Let the tab switch paint first; printing from the same tick captures the Clients panel.
+    setTimeout(() => window.print(), 80);
+  };
+
   const downloadPlan = (txt: string) => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([txt], { type: "application/json" }));
@@ -1728,10 +1740,35 @@ export default function App() {
   );
 
   return (
-    <div style={{ display: "flex", border: "1px solid #e0e0e0", borderRadius: 12, overflow: "hidden", fontFamily: "system-ui,sans-serif", background: "#fff", minHeight: 500 }}>
+    <div className="mc-shell" style={{ display: "flex", border: "1px solid #e0e0e0", borderRadius: 12, overflow: "hidden", fontFamily: "system-ui,sans-serif", background: "#fff", minHeight: 500 }}>
+
+      {/*
+        Print layout. The dashboard keeps its results in panels that scroll inside themselves,
+        which on paper means everything past the first screenful is simply cut off — so these
+        rules unclip them and drop the controls, leaving a report rather than a screenshot.
+        !important is needed throughout because the component styles inline.
+      */}
+      <style>{`
+        .print-only { display: none; }
+        @media print {
+          @page { size: A4 portrait; margin: 12mm; }
+          html, body { background: #fff !important; }
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+          .mc-shell { border: none !important; border-radius: 0 !important; min-height: 0 !important;
+                      overflow: visible !important; display: block !important; }
+          .mc-main  { overflow: visible !important; max-height: none !important; }
+          /* The panels that scroll on screen; on paper they run over as many pages as they need. */
+          .mc-scroll { max-height: none !important; overflow: visible !important; }
+          /* Chart.js draws to a fixed-size bitmap, so scale it down to the page and keep its shape. */
+          canvas { max-width: 100% !important; height: auto !important; }
+          .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+          tr, .mc-row { break-inside: avoid; page-break-inside: avoid; }
+        }
+      `}</style>
 
       {/* SIDEBAR */}
-      <div style={{ width: 256, minWidth: 256, background: "#f8f8f6", borderRight: "1px solid #e0e0e0", padding: "14px 13px", overflowY: "auto", maxHeight: "90vh", flexShrink: 0 }}>
+      <div className="no-print" style={{ width: 256, minWidth: 256, background: "#f8f8f6", borderRight: "1px solid #e0e0e0", padding: "14px 13px", overflowY: "auto", maxHeight: "90vh", flexShrink: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#333", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #e0e0e0" }}>⚙ Parameters</div>
 
         {/* Saving to a file rather than the browser is deliberate: the adviser chooses where a
@@ -1753,6 +1790,12 @@ export default function App() {
               e.target.value = "";   // so re-opening the same file still fires
             }} />
         </div>
+        <button onClick={printReport} disabled={!results} title={results ? "" : "Run the simulation first"}
+          style={{ width: "100%", padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6, marginBottom: 6,
+            border: "1px solid " + (results ? "#444" : "#ddd"), background: "#fff",
+            color: results ? "#444" : "#ccc", cursor: results ? "pointer" : "not-allowed" }}>
+          Save as PDF
+        </button>
         {planNote && <div style={{ fontSize: 10, color: "#888", marginBottom: 10 }}>{planNote}</div>}
         {!planNote && <div style={{ fontSize: 10, color: "#ccc", marginBottom: 10 }}>
           {dirName
@@ -2153,12 +2196,12 @@ export default function App() {
       </div>
 
       {/* MAIN */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflowY: "auto" }}>
+      <div className="mc-main" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflowY: "auto" }}>
 
         {/* Only worth a tab bar where the folder exists to browse — elsewhere the sidebar's
             save/open buttons are the whole story and a dead tab would just puzzle people. */}
         {FS_OK && (
-          <div style={{ display: "flex", gap: 2, padding: "6px 16px 0", borderBottom: "1px solid #eee" }}>
+          <div className="no-print" style={{ display: "flex", gap: 2, padding: "6px 16px 0", borderBottom: "1px solid #eee" }}>
             {([["sim", "Simulator"], ["clients", "Clients"]] as const).map(([k, label]) => (
               <button key={k} onClick={() => setTab(k)}
                 style={{ padding: "6px 14px", fontSize: 12, fontWeight: tab === k ? 700 : 500, cursor: "pointer",
@@ -2171,7 +2214,7 @@ export default function App() {
         )}
 
         {FS_OK && tab === "clients" && (
-          <div style={{ padding: "14px 16px" }}>
+          <div className="no-print" style={{ padding: "14px 16px" }}>
             {!dirHandle ? (
               <div style={{ maxWidth: 520 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Choose a folder for client plans</div>
@@ -2266,6 +2309,10 @@ export default function App() {
                 {adviserCode && <> · rep {adviserCode}</>}
               </div>
             )}
+            {/* On paper the reader has no way to tell when the figures were produced. */}
+            <div className="print-only" style={{ fontSize: 11, color: "#888", marginTop: 3 }}>
+              Prepared {new Date().toLocaleDateString("en-ZA", { day: "2-digit", month: "long", year: "numeric" })}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, background: "#f0f0f0", color: "#555" }}>
@@ -2763,7 +2810,7 @@ export default function App() {
                     Year by year
                     <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · on the fixed-return projection</span>
                   </div>
-                  <div style={{ maxHeight: 240, overflowY: "auto", overflowX: "auto", border: "1px solid #eee", borderRadius: 6 }}>
+                  <div className="mc-scroll" style={{ maxHeight: 240, overflowY: "auto", overflowX: "auto", border: "1px solid #eee", borderRadius: 6 }}>
                     <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%", minWidth: 330 }}>
                       <thead>
                         <tr style={{ color: "#999", background: "#fafafa", position: "sticky", top: 0 }}>
@@ -2811,6 +2858,43 @@ export default function App() {
               </span>
             )}
             {planDraws && results.pctRuined > 0 && <span style={{ color: results.pctRuined > 20 ? "#D85A30" : "#888" }}>Depleted: <strong>{results.pctRuined}%</strong></span>}
+          </div>
+        )}
+
+        {/*
+          On screen the assumptions are visible in the sidebar the whole time. On paper the
+          sidebar is gone, so a reader would be looking at outcomes with no idea what produced
+          them — which is the difference between a report and a set of unattributed numbers.
+        */}
+        {results && (
+          <div className="print-only avoid-break" style={{ padding: "14px 16px", borderTop: "1px solid #eee", fontSize: 10, color: "#555", lineHeight: 1.6 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#333", marginBottom: 5 }}>Assumptions</div>
+            <div>
+              Expected return {ret.toFixed(1)}%/yr before fees
+              {otherFees > 0 && <> · advice {adviceFee.toFixed(2)}% and platform {platformFee.toFixed(2)}%, so {(ret - otherFees).toFixed(2)}% net</>}
+              {" "}· volatility {vol.toFixed(1)}%/yr · inflation {inflation.toFixed(1)}%/yr
+              {" "}· horizon {years} years · {sims.toLocaleString()} simulated paths
+              {activeModel && <> · model {activeModel.name}</>}
+            </div>
+            <div>
+              Starting value {fmt(init)}
+              {planMode !== "post" && contrib > 0 && <> · contributing {fmt(contrib)}/mo{contribEsc > 0 && <> rising {contribEsc.toFixed(1)}%/yr</>}</>}
+              {planMode === "both" && retireDate && <> · retiring {retireDate}</>}
+              {planDraws && spendPolicy === "endowment"
+                ? <> · Income Review rule at {spendRate.toFixed(2)}% with {smoothing}/{100 - smoothing} smoothing</>
+                : planDraws && <> · drawing {fmt(withdraw)}/mo{effEsc > 0 && <> rising {effEsc.toFixed(1)}%/yr</>}</>}
+              {lumps.length > 0 && <> · {lumps.length} capital injection{lumps.length > 1 ? "s" : ""} totalling {fmt(lumps.reduce((s, l) => s + l.amount, 0))}</>}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 9, color: "#888" }}>
+              A Monte Carlo simulation projects many possible return sequences drawn at random around the
+              assumptions above. It shows how a plan behaves across a range of outcomes; it does not forecast
+              any of them. Returns are assumed to be normally distributed, which understates the chance of a
+              severe market fall, and the assumptions themselves — return, volatility, inflation and fees —
+              are estimates that will not hold exactly. Figures are before tax and take no account of changes
+              in legislation. Past performance is not a guide to future returns. This is not advice: it is a
+              planning illustration to be read with the adviser named above, whose firm is responsible for
+              any recommendation made from it.
+            </div>
           </div>
         )}
         </div>

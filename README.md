@@ -27,6 +27,16 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   third adapts to the balance. An "At retirement" panel reports the balance handed over.
 
   Horizon runs to 70 years to fit both phases.
+- **Save as PDF** — prints a client report through the browser's own *Save as PDF* destination,
+  so there is no PDF library and it honours the user's paper size. The sidebar, tab bar and
+  controls drop out; the header carries the client, adviser and FSP details plus the date the
+  figures were produced; and an assumptions block and disclaimer are added, since on paper the
+  sidebar is gone and the outcomes would otherwise be unattributed numbers.
+
+  The reason this needed doing at all is that the results live in panels that scroll inside
+  themselves — the year-by-year table is capped at 240px on screen — so a plain Ctrl+P captured
+  only the first screenful of each and silently cut the rest. The print rules unclip them, and
+  because the component styles inline, every one of those rules needs `!important` to win.
 - **Clients tab** — nominate a folder once (one inside OneDrive works well) and the tab lists every
   plan in it, most recently saved first, with a click to open. *Save plan* then writes straight into
   that folder, and *+ New client* clears the form while keeping the adviser and FSP details, since
