@@ -27,6 +27,11 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   third adapts to the balance. An "At retirement" panel reports the balance handed over.
 
   Horizon runs to 70 years to fit both phases.
+- **Bucket structure** can be switched off. One flag gates the whole overlay — its sidebar
+  sliders, its results panel and its share of the printed report — rather than three places kept
+  in step by hand. The switch is gated on the unswitched view, so turning it off does not take
+  the switch away with it. Off or on, the simulation is identical: the overlay never reaches the
+  engine, and the state is saved with the plan.
 - **Save as PDF** — prints a client report through the browser's own *Save as PDF* destination,
   so there is no PDF library and it honours the user's paper size. The sidebar, tab bar and
   controls drop out; the header carries the client, adviser and FSP details plus the date the

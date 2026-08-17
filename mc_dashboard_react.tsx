@@ -180,6 +180,7 @@ export default function App() {
   const [savingsTarget, setSavingsTarget] = useState(0);        // R goal for a saving plan; 0 = judge against the central projection only
   // Bucket structure is a reporting overlay only. These two live outside the simulation and
   // are deliberately kept out of runSim's dependencies — see bucketView below.
+  const [bucketsOn, setBucketsOn]       = useState(true);       // whether the overlay is shown at all
   const [bucket1Years, setBucket1Years] = useState(3);          // years of withdrawals held in the conservative bucket
   const [bucket2Years, setBucket2Years] = useState(4);          // years of withdrawals held in the moderate bucket
   // Retirement pivot. 0 keeps the original single-phase behaviour, where contributions and
@@ -246,6 +247,7 @@ export default function App() {
     skipMode: [skipMode, setSkipMode], skipEvery: [skipEvery, setSkipEvery], guardBand: [guardBand, setGuardBand],
     healthYear: [healthYear, setHealthYear], healthThreshold: [healthThreshold, setHealthThreshold],
     savingsTarget: [savingsTarget, setSavingsTarget],
+    bucketsOn: [bucketsOn, setBucketsOn],
     bucket1Years: [bucket1Years, setBucket1Years], bucket2Years: [bucket2Years, setBucket2Years],
     clientName: [clientName, setClientName], clientId: [clientId, setClientId], clientDob: [clientDob, setClientDob],
     dobTouched: [dobTouched, setDobTouched], adviserName: [adviserName, setAdviserName],
@@ -676,7 +678,7 @@ export default function App() {
    * are not discounted, which matches how a "hold N years of spending in cash" instruction is
    * normally given.
    */
-  const bucketView = (() => {
+  const bucketViewRaw = (() => {
     // A two-phase plan has no liquidity structure to describe until it retires, so the split
     // is measured at the pivot — the median balance handed over and the income that starts
     // there — rather than against the pre-retirement capital, which would be meaningless.
@@ -736,6 +738,11 @@ export default function App() {
       runwayMonths, runwayEnds, b1Yrs, b2Yrs, b3Yrs, baseCapital, atRetirement: twoPhaseView,
     };
   })();
+
+  // Switching the overlay off here takes out its sidebar sliders, its panel and its share of the
+  // printed report in one move, rather than leaving three places to keep in step. The raw view
+  // stays available so the switch itself can still be offered on a plan that could show it.
+  const bucketView = bucketsOn ? bucketViewRaw : null;
 
   // Model presets — return + volatility linked to the model-portfolio spreadsheet
   // (models/dnaModels.ts + models/monarchModels.ts, regenerated via `npm run sync-models`).
@@ -2050,19 +2057,37 @@ export default function App() {
           </div>
         )}
 
-        {/* Bucket structure — display only, so these inputs never re-run the simulation. */}
-        {bucketView && (
+        {/* Bucket structure — display only, so these inputs never re-run the simulation.
+            Gated on the raw view rather than the switched one, or turning it off would take the
+            switch away with it and leave no way back. */}
+        {bucketViewRaw && (
           <>
             {hr}
-            {secLabel("Bucket structure")}
-            <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
-              Splits the opening capital by how many years of withdrawals each bucket covers. Presentation only — it does not change the simulation.
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              {secLabel("Bucket structure")}
+              <button onClick={() => setBucketsOn(v => !v)}
+                style={{ padding: "2px 9px", fontSize: 10, fontWeight: 600, borderRadius: 10, cursor: "pointer",
+                  border: "1px solid " + (bucketsOn ? "#1D9E75" : "#ddd"),
+                  background: bucketsOn ? "#e8f7ef" : "#fff", color: bucketsOn ? "#1a7a4a" : "#aaa" }}>
+                {bucketsOn ? "On" : "Off"}
+              </button>
             </div>
-            {sRow("Bucket 1 · Conservative (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years, bucketView.b1Yrs + (bucketView.b1Yrs === 1 ? " yr" : " yrs"), "#1D9E75")}
-            {sRow("Bucket 2 · Moderate (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years, bucketView.b2Yrs + (bucketView.b2Yrs === 1 ? " yr" : " yrs"), "#378ADD")}
-            <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
-              Bucket 3 · Aggressive takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketView.b3Yrs} {bucketView.b3Yrs === 1 ? "yr" : "yrs"}</strong>
-            </div>
+            {bucketsOn ? (
+              <>
+                <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
+                  Splits the opening capital by how many years of withdrawals each bucket covers. Presentation only — it does not change the simulation.
+                </div>
+                {sRow("Bucket 1 · Conservative (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years, bucketViewRaw.b1Yrs + (bucketViewRaw.b1Yrs === 1 ? " yr" : " yrs"), "#1D9E75")}
+                {sRow("Bucket 2 · Moderate (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years, bucketViewRaw.b2Yrs + (bucketViewRaw.b2Yrs === 1 ? " yr" : " yrs"), "#378ADD")}
+                <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
+                  Bucket 3 · Aggressive takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketViewRaw.b3Yrs} {bucketViewRaw.b3Yrs === 1 ? "yr" : "yrs"}</strong>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 11, color: "#aaa", marginTop: -4, marginBottom: 8 }}>
+                Hidden — the panel and its share of the printed report are left out. The simulation is unaffected either way.
+              </div>
+            )}
           </>
         )}
 
