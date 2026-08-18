@@ -721,15 +721,18 @@ export default function App() {
     if (baseMonthly <= 0 || baseCapital <= 0) return null;
 
     const wEsc = effEsc / 100;
-    const annualAt = (y: number) => baseMonthly * 12 * Math.pow(1 + wEsc, y - 1);   // y is 1-based
+    // The opening allocation is struck at the starting withdrawal, flat — "hold three years of
+    // spending in cash" means three years at today's rate, not three years of a rising schedule.
+    // Escalating it made the later buckets grow against the earlier ones purely because their
+    // years fall later, which is not a decision anyone made about the split.
+    const annualIncome = baseMonthly * 12;
 
     const b1Yrs = Math.max(0, Math.min(Math.round(bucket1Years), drawYears));
     const b2Yrs = Math.max(0, Math.min(Math.round(bucket2Years), drawYears - b1Yrs));
     const b3Yrs = Math.max(0, drawYears - b1Yrs - b2Yrs);
 
-    let b1 = 0, b2 = 0;
-    for (let y = 1; y <= b1Yrs; y++) b1 += annualAt(y);
-    for (let y = b1Yrs + 1; y <= b1Yrs + b2Yrs; y++) b2 += annualAt(y);
+    const b1 = b1Yrs * annualIncome;
+    const b2 = b2Yrs * annualIncome;
 
     // Equity takes what is left. Negative means the stated cash and bond horizons need more
     // than the whole portfolio, which is worth saying plainly rather than clamping silently.
@@ -772,6 +775,12 @@ export default function App() {
   // printed report in one move, rather than leaving three places to keep in step. The raw view
   // stays available so the switch itself can still be offered on a plan that could show it.
   const bucketView = bucketsOn ? bucketViewRaw : null;
+
+  // Whether the overlay applies to this plan at all — which is a question about the inputs, not
+  // about whether a run has happened. A two-phase plan cannot draw the panel until it knows the
+  // balance handed over, but its sliders and its on/off switch do not depend on that, and gating
+  // them on the computed view made the whole section disappear until the first run.
+  const bucketsApply = planMode !== "pre" && (retireIn > 0 || withdraw > 0 || spendPolicy === "endowment");
 
   // Model presets — return + volatility linked to the model-portfolio spreadsheet
   // (models/dnaModels.ts + models/monarchModels.ts, regenerated via `npm run sync-models`).
@@ -2087,9 +2096,10 @@ export default function App() {
         )}
 
         {/* Bucket structure — display only, so these inputs never re-run the simulation.
-            Gated on the raw view rather than the switched one, or turning it off would take the
-            switch away with it and leave no way back. */}
-        {bucketViewRaw && (
+            Gated on whether the overlay applies to the plan, not on the computed view: gating on
+            the view took the switch away when it was turned off, and took the whole section away
+            on a two-phase plan until the first run. */}
+        {bucketsApply && (
           <>
             {hr}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -2106,11 +2116,22 @@ export default function App() {
                 <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
                   Splits the opening capital by how many years of withdrawals each bucket covers. Presentation only — it does not change the simulation.
                 </div>
-                {sRow("Bucket 1 · Conservative (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years, bucketViewRaw.b1Yrs + (bucketViewRaw.b1Yrs === 1 ? " yr" : " yrs"), "#1D9E75")}
-                {sRow("Bucket 2 · Moderate (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years, bucketViewRaw.b2Yrs + (bucketViewRaw.b2Yrs === 1 ? " yr" : " yrs"), "#378ADD")}
-                <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
-                  Bucket 3 · Aggressive takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketViewRaw.b3Yrs} {bucketViewRaw.b3Yrs === 1 ? "yr" : "yrs"}</strong>
-                </div>
+                {/* Fall back to the entered years until the view exists, so the sliders still
+                    read back what they are set to before the first run. */}
+                {sRow("Bucket 1 · Conservative (years)", 0, Math.max(1, years), 1, bucket1Years, setBucket1Years,
+                  (bucketViewRaw?.b1Yrs ?? bucket1Years) + ((bucketViewRaw?.b1Yrs ?? bucket1Years) === 1 ? " yr" : " yrs"), "#1D9E75")}
+                {sRow("Bucket 2 · Moderate (years)", 0, Math.max(1, years), 1, bucket2Years, setBucket2Years,
+                  (bucketViewRaw?.b2Yrs ?? bucket2Years) + ((bucketViewRaw?.b2Yrs ?? bucket2Years) === 1 ? " yr" : " yrs"), "#378ADD")}
+                {bucketViewRaw ? (
+                  <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
+                    Bucket 3 · Aggressive takes the remaining <strong style={{ color: "#8B5CF6" }}>{bucketViewRaw.b3Yrs} {bucketViewRaw.b3Yrs === 1 ? "yr" : "yrs"}</strong>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11, color: "#aaa", marginTop: -4, marginBottom: 8 }}>
+                    Bucket 3 · Aggressive takes the rest. The split is measured against the balance handed over at
+                    retirement, so the amounts appear once the simulation has run.
+                  </div>
+                )}
               </>
             ) : (
               <div style={{ fontSize: 11, color: "#aaa", marginTop: -4, marginBottom: 8 }}>
