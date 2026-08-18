@@ -377,11 +377,17 @@ export default function App() {
     setClientList(out); setListBusy(false);
   };
 
-  const ensureDirAccess = async (h: any) => {
+  /**
+   * "denied" and "prompt" need telling apart. A prompt can be answered; a denial cannot be
+   * re-asked — requestPermission returns straight back without showing anything — and the only
+   * way out is to pick the folder again. Reporting both as "not granted" left the folder
+   * looking broken with nothing to do about it.
+   */
+  const dirAccess = async (h: any): Promise<"granted" | "denied" | "error"> => {
     try {
-      if (await h.queryPermission({ mode: "readwrite" }) === "granted") return true;
-      return await h.requestPermission({ mode: "readwrite" }) === "granted";
-    } catch { return false; }
+      if (await h.queryPermission({ mode: "readwrite" }) === "granted") return "granted";
+      return await h.requestPermission({ mode: "readwrite" }) === "granted" ? "granted" : "denied";
+    } catch { return "error"; }
   };
 
   const pickFolder = async () => {
@@ -396,8 +402,12 @@ export default function App() {
 
   const reconnectFolder = async () => {
     if (!dirHandle) return;
-    if (await ensureDirAccess(dirHandle)) listClients(dirHandle);
-    else setPlanNote("Access to that folder was not granted.");
+    const access = await dirAccess(dirHandle);
+    if (access === "granted") { listClients(dirHandle); setPlanNote(null); return; }
+    // Nothing appeared on screen when this happened, so say why and point at the way out.
+    setPlanNote(access === "denied"
+      ? "The browser is blocking " + dirName + " and will not ask again. Choose the folder again to restore access."
+      : dirName + " could not be reached. It may have been moved or renamed.");
   };
 
   const forgetFolder = async () => {
@@ -453,11 +463,17 @@ export default function App() {
   };
 
   const downloadPlan = (txt: string) => {
+    const url = URL.createObjectURL(new Blob([txt], { type: "application/json" }));
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([txt], { type: "application/json" }));
+    a.href = url;
     a.download = planFileName();
+    // In the document and revoked on a later tick: revoking straight after click() can cancel
+    // the download before the browser has read the blob, and this is now the fallback that
+    // stops a plan being lost when the folder is unavailable.
+    a.style.display = "none";
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 30000);
     setPlanNote("Saved " + a.download);
   };
 
@@ -468,16 +484,29 @@ export default function App() {
    */
   const savePlan = async () => {
     const txt = planJson();
-    if (!dirHandle) { downloadPlan(txt); return; }
-    if (!await ensureDirAccess(dirHandle)) { setPlanNote("Access to the client folder was not granted."); return; }
-    try {
-      const fh = curFile || await dirHandle.getFileHandle(planFileName(), { create: true });
-      const w = await fh.createWritable();
-      await w.write(txt); await w.close();
-      setCurFile(fh);
-      setPlanNote("Saved to " + dirName + " · " + fh.name);
-      listClients(dirHandle);
-    } catch { setPlanNote("Could not write to the client folder."); }
+    if (dirHandle) {
+      const access = await dirAccess(dirHandle);
+      if (access === "granted") {
+        try {
+          const fh = curFile || await dirHandle.getFileHandle(planFileName(), { create: true });
+          const w = await fh.createWritable();
+          await w.write(txt); await w.close();
+          setCurFile(fh);
+          setPlanNote("Saved to " + dirName + " · " + fh.name);
+          listClients(dirHandle);
+          return;
+        } catch { /* folder reachable but the write failed — fall through rather than lose it */ }
+      }
+      // Whatever is wrong with the folder, the plan itself must still land somewhere. Failing
+      // outright meant a client's details were simply gone when the button did nothing visible.
+      downloadPlan(txt);
+      setPlanNote(access === "denied"
+        ? "The browser is blocking " + dirName + ", so the plan was downloaded instead. Choose the folder again on the Clients tab to save there."
+        : "Could not write to " + dirName + ", so the plan was downloaded instead.");
+      setDirBlocked(access === "denied");
+      return;
+    }
+    downloadPlan(txt);
   };
 
   /** Open a plan the user picked by hand, from anywhere on disk. */
@@ -2270,9 +2299,19 @@ export default function App() {
 
                 {/* A lapsed permission looks exactly like an empty folder unless it is said out loud. */}
                 {dirBlocked ? (
-                  <div style={{ fontSize: 12, color: "#666", background: "#fdf6ec", border: "1px solid #f0d9b5", borderRadius: 8, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 12, color: "#666", background: "#fdf6ec", border: "1px solid #f0d9b5", borderRadius: 8, padding: "12px 14px", lineHeight: 1.55 }}>
                     The browser needs permission to read <strong>{dirName}</strong> again — it asks once per session.
-                    <button onClick={reconnectFolder} style={{ marginLeft: 10, padding: "4px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #D85A30", background: "#fff", color: "#D85A30", cursor: "pointer" }}>Reconnect</button>
+                    <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                      <button onClick={reconnectFolder} style={{ padding: "4px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #D85A30", background: "#fff", color: "#D85A30", cursor: "pointer" }}>Reconnect</button>
+                      <button onClick={pickFolder} style={{ padding: "4px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", cursor: "pointer" }}>Choose folder again</button>
+                    </div>
+                    {/* If the permission was refused rather than merely lapsed, Reconnect cannot
+                        re-ask and picking the folder again is the only thing that clears it. */}
+                    <div style={{ fontSize: 10, color: "#a08a6a", marginTop: 7 }}>
+                      If Reconnect does nothing, the permission was refused rather than expired — the browser will not
+                      ask a second time. Choose the folder again to clear it. Saving still works meanwhile; plans go to
+                      your downloads folder until access is restored.
+                    </div>
                   </div>
                 ) : clientList.length === 0 ? (
                   <div style={{ fontSize: 12, color: "#999", padding: "18px 0" }}>
