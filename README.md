@@ -87,12 +87,38 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
 
   The odds it consults come from a separate unruled calibration pass, never from paths that
   already used the rule — otherwise it would be judging itself.
-- **Withdrawal guardrail** — freezes next year's increase only when *both* the balance is below a
-  configurable band (default 90%) of a fixed expected-balance trajectory *and* that year's market
-  return was negative. The trajectory is projected once at inception at the net return with
-  withdrawals always escalating, and is never re-baselined against actual paths. Frozen increases are
-  permanently forgone, not banked. Because each path's returns are replayed with and without the rule,
-  the reported improvement is a like-for-like comparison rather than two independent draws.
+- **Funding-level rule** — holds next year's increase when the portfolio falls below a configurable
+  share (default 100%) of the present value of the income it still has to pay, **or** below its
+  starting rand value. Available under either spending policy, since the test is on the state of the
+  plan rather than on how the income is set. Frozen increases are permanently forgone, not banked,
+  and because each path's returns are replayed with and without the rule the reported improvement is
+  like-for-like rather than two independent draws.
+
+  This replaced an earlier guardrail that held only when the balance was below an expected-balance
+  trajectory **and** the year's return was negative. The return condition is the error: a plan can
+  grind into serious underfunding through a run of small positive years, and a rule that waits for a
+  loss never sees it. The two limbs kept here fail at different times — the funded ratio fires early
+  on a poor opening sequence then falls quiet, while the starting-value test adds nothing in the
+  first decade and catches plans late as its threshold deflates.
+
+  The income is valued as a level real stream at a **real discount rate** (default 4.5%) over the
+  years remaining to a **planning age** (default 95), taken from the client's date of birth where one
+  is entered and from the plan horizon otherwise. Those two are calibrations rather than client
+  facts and they move the answer, so they are exposed rather than buried: a cautious pair buys no
+  extra survival and pays the client less.
+- **Explicit reduction**, off by default. Below a funded ratio of 0.85 the income is cut so the
+  **total real reduction** for that year reaches 8%, the withheld increase supplying part of it and
+  an explicit cut the rest.
+
+  The reason it exists: a rule whose only action is withholding an increase has a maximum
+  intervention exactly equal to the inflation rate, so its strength is set by the inflation regime
+  rather than by how much trouble the plan is in — at 3% inflation it cannot remove more than 2.9%
+  of real income however underfunded the plan becomes. Measured on this engine at a 7% drawdown with
+  real returns held identical and only inflation varying between 3% and 5.5%, a hold-only rule's
+  30-year survival spans 72–95% (22 points); with the reduction it spans 94–98% (4 points).
+
+  It is off by default because it changes what a client must be told at outset — that their income
+  can fall 8% in real terms in a year — which is a disclosure decision rather than a modelling one.
 - **Capital injections** — one-off lump sums added in a specific year (multiple supported).
 - **Market assumptions** — expected annual return and annual volatility (σ), used to draw normally-distributed monthly returns (Box-Muller `randn()`).
 - **Portfolio health diagnostic** (shown once there are withdrawals) — the "vital signs" from

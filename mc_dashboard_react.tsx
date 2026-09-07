@@ -135,6 +135,8 @@ interface SimResults {
   avgReturn: ByPercentile<{ earned: number; real: number | null; balance: number | null }>;
   labels: string[];
   avgInc: string; avgSkip: string; finalContrib: number;
+  /** How often the explicit reduction fired: average per plan, and the share of plans it touched. */
+  avgCut: string; pctPathsCut: number;
   expectedBalance: number[];
   /**
    * Failure-odds curves keyed by sign then year, as (reading, odds) points. Carried out of the
@@ -174,7 +176,16 @@ export default function App() {
   const [customEsc, setCustomEsc]     = useState(5);
   const [skipMode, setSkipMode]       = useState("none");
   const [skipEvery, setSkipEvery]     = useState(3);
-  const [guardBand, setGuardBand]     = useState(90);           // % of the expected-balance trajectory below which the guardrail arms
+  // The funding rule. The band is the funded ratio — portfolio divided by the present value of
+  // the income still to be paid — below which next year's increase is withheld.
+  const [guardBand, setGuardBand]     = useState(100);          // % of the income it must still pay
+  const [realDisc, setRealDisc]       = useState(4.5);          // real rate used to value the remaining income
+  const [planToAge, setPlanToAge]     = useState(95);           // age the income is planned to reach
+  // The explicit reduction. Off by default: it changes what a client must be told at outset,
+  // which is a disclosure decision rather than a modelling one.
+  const [cutOn, setCutOn]             = useState(false);
+  const [cutAt, setCutAt]             = useState(85);           // funded ratio % below which it fires
+  const [cutTotal, setCutTotal]       = useState(8);            // total real reduction for that year, %
   const [healthYear, setHealthYear]   = useState(5);            // year the health diagnostic reports on (Sandidge's worked example is year 5)
   const [healthThreshold, setHealthThreshold] = useState(50);   // % odds of failing above which the health rule freezes the increase
   const [savingsTarget, setSavingsTarget] = useState(0);        // R goal for a saving plan; 0 = judge against the central projection only
@@ -245,6 +256,8 @@ export default function App() {
     init: [init, setInit], contrib: [contrib, setContrib], contribEsc: [contribEsc, setContribEsc],
     withdraw: [withdraw, setWithdraw], escMode: [escMode, setEscMode], customEsc: [customEsc, setCustomEsc],
     skipMode: [skipMode, setSkipMode], skipEvery: [skipEvery, setSkipEvery], guardBand: [guardBand, setGuardBand],
+    realDisc: [realDisc, setRealDisc], planToAge: [planToAge, setPlanToAge],
+    cutOn: [cutOn, setCutOn], cutAt: [cutAt, setCutAt], cutTotal: [cutTotal, setCutTotal],
     healthYear: [healthYear, setHealthYear], healthThreshold: [healthThreshold, setHealthThreshold],
     savingsTarget: [savingsTarget, setSavingsTarget],
     bucketsOn: [bucketsOn, setBucketsOn],
@@ -926,24 +939,58 @@ export default function App() {
      * Because part of the amount tracks the portfolio, a falling market pulls the income down
      * gradually rather than leaving it to rise regardless.
      */
-    const endowmentNext = (priorMonthly: number, pv: number) => {
+    const endowmentNext = (priorMonthly: number, pv: number, hold = false, cut = false) => {
       const subtotal = smoothW * (priorMonthly * 12) + (1 - smoothW) * (pv * spendR);
-      return subtotal * (1 + cpi) / 12;
+      return subtotal * reviewFactor(cpi, hold, cut) / 12;
     };
+
+    /**
+     * What this year's review does to the income, as a multiplier.
+     *
+     * The three outcomes are deliberately expressed against inflation rather than against the
+     * escalation rate. Withholding an increase can only ever remove the inflation rate's worth
+     * of real income, so a rule built only on holds has a maximum intervention set by the
+     * inflation regime rather than by how much trouble the plan is in — at 3% inflation it
+     * cannot take away more than 2.9% however badly underfunded the plan is. Specifying the
+     * cut as a total REAL reduction removes that dependence: the withheld increase supplies
+     * part of it and an explicit reduction supplies the rest, whatever inflation happens to be.
+     */
+    const reviewFactor = (normalGrowth: number, hold: boolean, cut: boolean) =>
+      cut  ? (1 + cpi) * (1 - cutSize)   // total real reduction of cutSize, inflation-independent
+      : hold ? 1                          // increase withheld: a real fall of cpi/(1+cpi)
+      : (1 + normalGrowth);
 
     const lumpMap: Record<number, number> = {};
     lumps.forEach((l: any) => { const k = l.year * 12; lumpMap[k] = (lumpMap[k] || 0) + l.amount; });
 
-    // Guardrail: fixed "expected balance trajectory", computed ONCE at plan inception.
-    // Deterministic projection at the net return, with withdrawals always escalating at the
-    // full plan rate. It is never re-baselined against actual paths and never sees a freeze —
-    // it is the static yardstick the guardrail measures against for the life of the plan.
-    const guardOn = skipMode === "guard" && wEsc > 0;
+    // The funding rule applies under either spending policy, since the test is on the state of
+    // the plan rather than on how the income happens to be set.
+    const fundingOn = skipMode === "guard" && (wEsc > 0 || endowOn);
     const healthRuleOn = skipMode === "health" && wEsc > 0;
     // Endowment reports against the lifestyle policy on the same paths, which is the
     // comparison the approach exists to make.
-    const comparingOn = guardOn || healthRuleOn || endowOn;
-    const bandFrac = guardBand / 100;
+    const comparingOn = fundingOn || healthRuleOn || endowOn;
+    const holdFrac = guardBand / 100;
+    const cutFrac  = cutAt / 100;
+    const cutSize  = cutTotal / 100;
+    const realDiscL = realDisc / 100;
+
+    /**
+     * The funded ratio: the portfolio divided by the present value of the income still to be
+     * paid. Testing this rather than the year's return is the change that matters — a plan can
+     * grind into serious underfunding through a run of small positive years, and a rule that
+     * waits for a loss never sees it.
+     *
+     * The income is valued as a level real stream discounted at a real rate, so the inflation
+     * term cancels and the figure is in the same rands as the balance it is compared against.
+     * The horizon runs to a planning age where a date of birth is known, since that is a fact
+     * about the client rather than about the projection; otherwise it falls back to the plan's
+     * own horizon.
+     */
+    const annuityFactor = (n: number, r: number) =>
+      n <= 0 ? 0 : r <= 0 ? n : (1 - Math.pow(1 + r, -n)) / r;
+    const yearsStillToPay = (yr: number) =>
+      clientAge !== null ? Math.max(0, planToAge - (clientAge + yr)) : Math.max(0, years - yr);
 
     // Set once calibration has run. Null while calibrating, which is what keeps the health
     // rule from feeding on itself: the odds it consults come from paths that never used it.
@@ -980,7 +1027,7 @@ export default function App() {
       let balAtRetirement = twoPhase ? 0 : init;
       const path = [val], wpath = [curW];
       const freezeYears = [];
-      let skips = 0, incs = 0;
+      let skips = 0, incs = 0, cuts = 0;
       // How the income moved year to year, so the policy can be described by what it does to
       // a client's income rather than only by what it does to the balance.
       let incSum = 0, incCount = 0, incDrops = 0;
@@ -1002,7 +1049,16 @@ export default function App() {
           let g = 1;
           for (let k = (yr - 1) * 12; k < yr * 12; k++) g *= (1 + monthlyReturns[k]);
           const yearReturn = g - 1;
-          const belowTrajectory = val < bandFrac * expectedBalance[yr];
+
+          // The funding test. Two limbs, because they fail at different times: the funded ratio
+          // fires early, catching a poor opening sequence, then falls quiet once a plan has
+          // either recovered or already failed; the starting-value test does the reverse, adding
+          // nothing in the first decade and catching plans late as its threshold deflates.
+          const startRef = twoPhase ? balAtRetirement : init;
+          const pvRemaining = (curW * 12) * annuityFactor(yearsStillToPay(yr), realDiscL);
+          const fundedRatio = pvRemaining > 0 ? val / pvRemaining : Infinity;
+          const underfunded = fundedRatio < holdFrac || (startRef > 0 && val < startRef);
+          const needsCut = cutOn && fundedRatio < cutFrac;
 
           let current: VitalSigns | null = null;
           if (track) {
@@ -1029,8 +1085,11 @@ export default function App() {
           // applyRule=false is the comparison run, which always uses the lifestyle rule, so a
           // like-for-like figure exists for whichever policy is selected.
           if (endowOn && drawing && applyRule) {
+            const hold = fundingOn && underfunded;
+            const cut  = fundingOn && needsCut;
+            if (cut) cuts++; else if (hold) freezeYears.push(yr);
             const prevW = curW;
-            curW = endowmentNext(curW, val);
+            curW = endowmentNext(curW, val, hold, cut);
             if (prevW > 0) {
               const ch = curW / prevW - 1;
               incSum += ch; incCount++; if (ch < 0) incDrops++;
@@ -1041,10 +1100,14 @@ export default function App() {
             incs++;
           } else if (wEsc > 0 && drawing) {
             let skip;
+            // A cut subsumes the withheld increase rather than compounding with it, so the two
+            // are decided together and only one is applied.
+            let cutNow = false;
             if (skipMode === "guard") {
-              // Freeze only when BOTH hold.
-              skip = applyRule && belowTrajectory && yearReturn < 0;
-              if (skip) freezeYears.push(yr);
+              // Test the funding level, not the year's return.
+              skip = applyRule && underfunded;
+              cutNow = applyRule && needsCut;
+              if (!cutNow && skip) freezeYears.push(yr);
             } else if (skipMode === "health") {
               // Freeze while the odds of ending below 40% of capital sit above the
               // threshold. afrLookup is null during calibration, so those paths stay unruled.
@@ -1056,7 +1119,9 @@ export default function App() {
               skip = skipMode === "negative" ? neg : skipMode === "fixed" ? (yr % skipEvery === 0) : false;
             }
             // No catch-up: a frozen year's increase is permanently forgone, not banked.
-            if (skip) skips++; else { curW *= (1 + wEsc); incs++; }
+            if (cutNow) { curW *= reviewFactor(wEsc, false, true); cuts++; skips++; }
+            else if (skip) skips++;
+            else { curW *= (1 + wEsc); incs++; }
           }
           if (cEsc > 0 && (!twoPhase || m <= retireM)) curC *= (1 + cEsc);
           yrStart = val;
@@ -1091,7 +1156,7 @@ export default function App() {
       for (let m = 0; m < months; m++) growth *= (1 + monthlyReturns[m]);
       const earned = Math.pow(growth, 1 / years) - 1;
 
-      return { final: val, path, wpath, freezeYears, skips, incs, signs, balAtRetirement, earned, drawn, drawnReal,
+      return { final: val, path, wpath, freezeYears, skips, incs, cuts, signs, balAtRetirement, earned, drawn, drawnReal,
         avgIncrease: incCount ? incSum / incCount : 0, dropShare: incCount ? incDrops / incCount : 0 };
     };
 
@@ -1101,7 +1166,7 @@ export default function App() {
       Array.from({ length: months }, () => muM + sigM * randn());
 
     const finals: number[] = [], paths: number[][] = [], wpaths: number[][] = [];
-    let totSkip = 0, totInc = 0;
+    let totSkip = 0, totInc = 0, totCut = 0, pathsCut = 0;
     let totFreeze = 0, freezeOnSuccess = 0, successCount = 0, baseSuccess = 0, pathsFrozen = 0;
     const freezeByYear: number[] = Array(years + 1).fill(0);
 
@@ -1258,7 +1323,7 @@ export default function App() {
       const monthlyReturns = genReturns();
 
       const r = runOnePath(monthlyReturns, true, healthOn);
-      totSkip += r.skips; totInc += r.incs;
+      totSkip += r.skips; totInc += r.incs; totCut += r.cuts; if (r.cuts) pathsCut++;
       if (healthOn) allSigns.push(r.signs);
 
       if (comparingOn) {
@@ -1567,6 +1632,7 @@ export default function App() {
       p5a, p50a, p75a, p95a, w5a, w50a, w75a, w95a, linPort, linW, dep, real, avgReturn,
       labels: Array.from({ length: years + 1 }, (_, i) => "Yr " + i),
       avgInc: (totInc / N).toFixed(1), avgSkip: (totSkip / N).toFixed(1), finalContrib,
+      avgCut: (totCut / N).toFixed(1), pctPathsCut: Math.round(100 * pathsCut / N),
       expectedBalance,
       curves: cal ? cal.curves : null,
       retirement: twoPhase && retBalances.length ? (() => {
@@ -1589,7 +1655,10 @@ export default function App() {
     });
     // healthYear is deliberately NOT a dependency — it only picks which precomputed year
     // the diagnostic displays, so moving it must not trigger another simulation run.
-  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, spendPolicy, spendRate, smoothing, planMode, effContrib, effWithdrawInput, effRetireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees]);
+  }, [init, contrib, contribEsc, withdraw, escMode, customEsc, skipMode, skipEvery, guardBand, healthThreshold, savingsTarget, spendPolicy, spendRate, smoothing, planMode, effContrib, effWithdrawInput, effRetireMonths, wBasis, wPct, ret, vol, years, sims, effEsc, lumps, inflation, otherFees,
+      // The funding rule's inputs. Omitting any of these leaves runSim closing over a stale
+      // value, so the rule silently does nothing while the panel says it is on.
+      realDisc, planToAge, cutOn, cutAt, cutTotal, clientAge]);
 
   useEffect(() => { if (chartReady) runSim(); }, [chartReady]);
 
@@ -1780,6 +1849,67 @@ export default function App() {
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span style={{ display: "inline-block", width: 12, height: 10, background: "rgba(136,135,128,.2)", borderRadius: 2 }} />band
         </span>
+      )}
+    </div>
+  );
+
+  // The funding rule's parameters, shared by both spending policies because the test is on the
+  // state of the plan rather than on how the income happens to be set.
+  const fundingParams = (
+    <div>
+      <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
+        Holds next year's increase when the portfolio falls below <strong>{guardBand}%</strong> of the income
+        it still has to pay, <strong>or</strong> below its starting value. Tests the funding level rather than
+        the year's return, because a plan can grind into underfunding through a run of small positive years
+        and a rule that waits for a loss never sees it.
+      </div>
+      {sRow("Hold below funded ratio (%)", 60, 120, 5, guardBand, setGuardBand, guardBand + "% funded", "#185FA5")}
+      {sRow("Real discount rate (%)", 2, 8, 0.5, realDisc, setRealDisc, realDisc.toFixed(1) + "%", "#185FA5")}
+      {sRow("Plan income to age", 85, 105, 1, planToAge, setPlanToAge, "age " + planToAge, "#185FA5")}
+      <div style={{ fontSize: 10, color: "#bbb", marginTop: -4, marginBottom: 10 }}>
+        {clientAge !== null
+          ? <>From the client's age, that is <strong style={{ color: "#999" }}>{Math.max(0, planToAge - clientAge)} years</strong> of income to value.</>
+          : <>No date of birth entered, so the plan's {years}-year horizon is used instead. Enter one for a per-client horizon.</>}
+        {" "}These two are calibrations, not client facts, and they move the answer: a cautious pair buys no extra
+        survival and pays the client less.
+      </div>
+
+      {/* Off by default. A cut is a promise a client has to be given at outset, which is a
+          disclosure decision rather than a modelling one. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 600, color: "#555" }}>Reduce income when badly underfunded</span>
+        <button onClick={() => setCutOn(v => !v)}
+          style={{ padding: "2px 9px", fontSize: 10, fontWeight: 600, borderRadius: 10, cursor: "pointer",
+            border: "1px solid " + (cutOn ? "#D85A30" : "#ddd"),
+            background: cutOn ? "#fdf0ea" : "#fff", color: cutOn ? "#993C1D" : "#aaa" }}>
+          {cutOn ? "On" : "Off"}
+        </button>
+      </div>
+      {cutOn ? (
+        <>
+          <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
+            Below <strong>{cutAt}%</strong> funded, income is cut so the <strong>total real reduction reaches {cutTotal}%</strong> that
+            year — the withheld increase supplies {(100 * (inflation / 100) / (1 + inflation / 100)).toFixed(1)}% of it and an
+            explicit cut of {(100 * (1 - (1 - cutTotal / 100) * (1 + inflation / 100))).toFixed(1)}% supplies the rest.
+            <div style={{ marginTop: 5, color: "#b06a4a" }}>
+              Holding an increase can only ever remove the inflation rate's worth of real income, so a rule built
+              only on holds is as strong as inflation happens to be rather than as strong as the plan needs.
+              Targeting a total reduction removes that. The client must be told at outset that their income can
+              fall {cutTotal}% in real terms in a year.
+            </div>
+          </div>
+          {sRow("Cut below funded ratio (%)", 60, 100, 5, cutAt, setCutAt, cutAt + "% funded", "#D85A30")}
+          {sRow("Total real reduction (%)", 2, 15, 1, cutTotal, setCutTotal, cutTotal + "% that year", "#D85A30")}
+          {results && <div style={{ fontSize: 11, color: "#888", marginTop: -4, marginBottom: 8 }}>
+            Fires <strong>{results.avgCut}</strong> times per plan · touches <strong>{results.pctPathsCut}%</strong> of plans
+          </div>}
+        </>
+      ) : (
+        <div style={{ fontSize: 10, color: "#bbb", marginBottom: 10 }}>
+          Off: the rule can only withhold an increase, so its deepest intervention is
+          {" "}{(100 * (inflation / 100) / (1 + inflation / 100)).toFixed(1)}% of real income at {inflation.toFixed(1)}% inflation,
+          however underfunded the plan becomes.
+        </div>
       )}
     </div>
   );
@@ -1985,6 +2115,27 @@ export default function App() {
               <br />
               <span style={{ color: "#bbb" }}>Higher smoothing changes the income more slowly. 100 would ignore the portfolio entirely, which is the lifestyle policy.</span>
             </div>
+
+            {/* The smoothing formula moderates the income as a by-product but contains no
+                discrete test and no floor. Adding one is where most of the improvement lies. */}
+            {planMode !== "pre" && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#555" }}>Funding test on the review</span>
+                  <button onClick={() => setSkipMode(skipMode === "guard" ? "none" : "guard")}
+                    style={{ padding: "2px 9px", fontSize: 10, fontWeight: 600, borderRadius: 10, cursor: "pointer",
+                      border: "1px solid " + (skipMode === "guard" ? "#185FA5" : "#ddd"),
+                      background: skipMode === "guard" ? "#f0f6fd" : "#fff", color: skipMode === "guard" ? "#185FA5" : "#aaa" }}>
+                    {skipMode === "guard" ? "On" : "Off"}
+                  </button>
+                </div>
+                {skipMode === "guard" ? fundingParams : (
+                  <div style={{ fontSize: 10, color: "#bbb", marginBottom: 10 }}>
+                    Off: the income follows the portfolio through the smoothing weight alone, with no test and no floor.
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
         {/* The retirement date only means anything for a plan that spans both phases. */}
@@ -2070,23 +2221,16 @@ export default function App() {
               <option value="none">Never</option>
               <option value="negative">After a negative year</option>
               <option value="fixed">On a fixed cadence</option>
-              <option value="guard">Guardrail — below trajectory and negative</option>
+              <option value="guard">Funding level — below the income it must pay</option>
               <option value="health">Health score — when the odds turn</option>
             </select>
             {skipMode === "negative" && <div style={{ fontSize: 11, color: "#993C1D", background: "#fff7ed", border: "1px solid #f5c4b3", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>Skips the increase in any year the portfolio return was negative.</div>}
             {skipMode === "fixed" && sRow("Skip every (years)", 1, 10, 1, skipEvery, setSkipEvery, `Every ${skipEvery} yr${skipEvery > 1 ? "s" : ""}`)}
-            {skipMode === "guard" && (
-              <div>
-                <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
-                  Freezes next year's increase only when <strong>both</strong> are true: the balance is below {guardBand}% of its expected trajectory <strong>and</strong> the year's return was negative. Skipped increases are never caught up later.
-                </div>
-                {sRow("Trajectory band (%)", 50, 100, 1, guardBand, setGuardBand, guardBand + "% of expected", "#185FA5")}
-              </div>
-            )}
+            {skipMode === "guard" && fundingParams}
             {skipMode === "health" && (
               <div>
                 <div style={{ fontSize: 11, color: "#185FA5", background: "#f0f6fd", border: "1px solid #c5dcf5", borderRadius: 6, padding: "7px 9px", marginBottom: 10 }}>
-                  Freezes next year's increase whenever the health score passes {healthThreshold}% — that is, once a plan showing these warning signs more often than not ends below 40% of its capital. Unlike the guardrail this reacts to <strong>built-up momentum</strong>, so it holds back harder on a stressed plan and leaves a comfortable one alone.
+                  Freezes next year's increase whenever the health score passes {healthThreshold}% — that is, once a plan showing these warning signs more often than not ends below 40% of its capital. Unlike the funding test this reacts to <strong>built-up momentum</strong>, so it holds back harder on a stressed plan and leaves a comfortable one alone.
                 </div>
                 {sRow("Act above odds of", 30, 80, 5, healthThreshold, setHealthThreshold, healthThreshold + "% failing", "#185FA5")}
               </div>
@@ -2562,12 +2706,12 @@ export default function App() {
           return (
             <div style={{ borderTop: "1px solid #eee", background: "#fbfcfe" }}>
               <div style={{ padding: "10px 16px 0", fontSize: 12, fontWeight: 600, color: "#444" }}>
-                {spendPolicy === "endowment" ? "Income Review rule vs lifestyle" : skipMode === "health" ? "Health-score rule impact" : "Withdrawal guardrail impact"}
-                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {spendPolicy === "endowment" ? `income reset each year to ${smoothing}% of last year plus ${100 - smoothing}% of ${spendRate.toFixed(1)}% of the portfolio` : skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `freeze increase when below ${g.band}% of expected trajectory AND year's return is negative`}</span>
+                {spendPolicy === "endowment" ? "Income Review rule vs lifestyle" : skipMode === "health" ? "Health-score rule impact" : "Funding-level rule impact"}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#888" }}> · {spendPolicy === "endowment" ? `income reset each year to ${smoothing}% of last year plus ${100 - smoothing}% of ${spendRate.toFixed(1)}% of the portfolio` : skipMode === "health" ? `freeze increase while the odds of failing exceed ${healthThreshold}%` : `hold the increase below ${g.band}% funded, or below the starting value` + (cutOn ? `, and cut to a ${cutTotal}% total real reduction below ${cutAt}% funded` : "")}</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 4px 10px" }}>
-                {cell(spendPolicy === "endowment" ? "Success — lifestyle" : skipMode === "health" ? "Success — no rule" : "Success — no guardrail", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
-                {cell(spendPolicy === "endowment" ? "Success — Income Review" : skipMode === "health" ? "Success — with rule" : "Success — with guardrail", results.pctSuccess + "%", "#1D9E75", "same return paths")}
+                {cell(spendPolicy === "endowment" ? "Success — lifestyle" : skipMode === "health" ? "Success — no rule" : "Success — no rule", g.pctSuccessNoGuard + "%", "#D85A30", "same return paths")}
+                {cell(spendPolicy === "endowment" ? "Success — Income Review" : skipMode === "health" ? "Success — with rule" : "Success — with rule", results.pctSuccess + "%", "#1D9E75", "same return paths")}
                 {cell("Improvement", (lift >= 0 ? "+" : "") + lift + " pts", lift > 0 ? "#1D9E75" : "#888", "like for like")}
                 {spendPolicy !== "endowment" && cell("Avg freezes / path", g.avgFreezes.toFixed(1), "#185FA5", `${g.avgFreezesOnSuccess.toFixed(1)} on surviving paths`)}
                 {spendPolicy !== "endowment" && cell("Paths ever frozen", g.pctPathsEverFrozen + "%", "#185FA5", `most common: Yr ${g.peakFreezeYear}`)}
