@@ -27,6 +27,21 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   third adapts to the balance. An "At retirement" panel reports the balance handed over.
 
   Horizon runs to 70 years to fit both phases.
+- **Risk profile check.** The client's profiled risk is recorded from the questionnaire, and the
+  panel states the profile the bucket structure *implies* alongside it, with the difference named
+  in steps on the firm's own model ladder.
+
+  The reason it exists: cover is an allocation decision wearing a different label. Years of cover
+  multiplied by the drawdown rate **is** the defensive share — arithmetic, not a modelling choice —
+  so 4+4 years at a 7% drawdown fixes the portfolio at 56% defensive whatever the client was
+  profiled as, and a higher income automatically produces a more cautious portfolio. Without this
+  the two could disagree indefinitely and nobody would see it.
+
+  The implied volatility is computed from the split using asset-class figures (defensive 3.85%,
+  growth 12.90%, correlation 0.12) rather than the single blended volatility the simulation runs
+  on, because the question is what the *split* implies. It is then matched to the nearest rung of
+  the selected model range, so the comparison is in the adviser's own language. The profiled
+  figure drives nothing in the simulation — it is recorded and compared, never applied.
 - **Bucket structure** can be switched off. One flag gates the whole overlay — its sidebar
   sliders, its results panel and its share of the printed report — rather than three places kept
   in step by hand. The switch is gated on the unswitched view, so turning it off does not take

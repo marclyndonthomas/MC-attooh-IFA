@@ -209,6 +209,7 @@ export default function App() {
   const [clientName, setClientName]     = useState("");
   const [clientId, setClientId]         = useState("");
   const [clientDob, setClientDob]       = useState("");
+  const [clientProfile, setClientProfile] = useState("");   // risk profile from the questionnaire
   const [dobTouched, setDobTouched]     = useState(false);   // once edited by hand, the ID stops overwriting it
   const [adviserName, setAdviserName]   = useState("");
   const [fspPractice, setFspPractice]   = useState("");
@@ -267,6 +268,7 @@ export default function App() {
     bucketsOn: [bucketsOn, setBucketsOn],
     bucket1Years: [bucket1Years, setBucket1Years], bucket2Years: [bucket2Years, setBucket2Years],
     clientName: [clientName, setClientName], clientId: [clientId, setClientId], clientDob: [clientDob, setClientDob],
+    clientProfile: [clientProfile, setClientProfile],
     dobTouched: [dobTouched, setDobTouched], adviserName: [adviserName, setAdviserName],
     fspPractice: [fspPractice, setFspPractice], fspCode: [fspCode, setFspCode], adviserCode: [adviserCode, setAdviserCode],
     spendPolicy: [spendPolicy, setSpendPolicy], spendRate: [spendRate, setSpendRate], smoothing: [smoothing, setSmoothing],
@@ -822,6 +824,50 @@ export default function App() {
     && ret === activeModel.nominalReturn
     && vol === activeModel.vol
     && inflation === INFLATION_ASSUMPTION;
+
+  /** The risk ladder to record a client against — the firm's own model labels, in order. */
+  const riskLadder = modelList.reduce((acc: string[], m: any) =>
+    acc.includes(m.risk) ? acc : [...acc, m.risk], []);
+
+  /**
+   * The risk profile the bucket structure implies, as against the one on the questionnaire.
+   *
+   * Cover is an allocation decision wearing a different label: years of cover multiplied by the
+   * drawdown rate IS the defensive share, so choosing 4+4 years at a 7% draw fixes the portfolio
+   * at 56% defensive whatever the client was profiled as. That relationship is arithmetic, not a
+   * modelling choice, and it means a high-drawdown client is de-risked automatically unless
+   * somebody looks. This puts both figures on screen so the difference can be explained rather
+   * than discovered.
+   *
+   * The implied volatility uses asset-class figures from the white paper rather than the single
+   * blended volatility the simulation runs on, since the question is what the SPLIT implies.
+   */
+  const DEFENSIVE_VOL = 3.85;   // 50/50 income fund and SA bonds
+  const GROWTH_VOL    = 12.90;  // 60/40 global and domestic equity, the paper's stated blend
+  const DEF_GROWTH_RHO = 0.12;
+
+  const profileCheck = (() => {
+    if (!bucketViewRaw) return null;
+    const g = bucketViewRaw.rows[2].pct / 100;                  // growth share the cover leaves
+    if (!(g >= 0 && g <= 1)) return null;
+    const w = Math.max(0, Math.min(1, g));
+    const impliedVol = Math.sqrt(
+      (1 - w) * (1 - w) * DEFENSIVE_VOL * DEFENSIVE_VOL +
+      w * w * GROWTH_VOL * GROWTH_VOL +
+      2 * w * (1 - w) * DEF_GROWTH_RHO * DEFENSIVE_VOL * GROWTH_VOL);
+    // Nearest rung of the firm's own ladder, so the comparison is in the adviser's language.
+    const nearest = modelList.reduce((best: any, m: any) =>
+      Math.abs(m.vol - impliedVol) < Math.abs(best.vol - impliedVol) ? m : best, modelList[0]);
+    const iA = riskLadder.indexOf(nearest.risk);
+    const iC = riskLadder.indexOf(clientProfile);
+    return {
+      growth: w * 100, defensive: (1 - w) * 100, impliedVol,
+      impliedRisk: nearest.risk, nearestModel: nearest.name,
+      coverYears: bucketViewRaw.b1Yrs + bucketViewRaw.b2Yrs,
+      // Positive means the structure is more adventurous than the client was profiled for.
+      steps: (iC >= 0 && iA >= 0) ? iA - iC : null,
+    };
+  })();
 
   /**
    * The inverse question: rather than "how does this rate fare", solve for the rate that
@@ -2009,6 +2055,17 @@ export default function App() {
           </div>
         </div>
 
+        {/* A client fact from the questionnaire, recorded so the structure can be checked
+            against it. Deliberately not used to drive anything in the simulation. */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 3 }}>Risk profile (from questionnaire)</div>
+          <select value={clientProfile} onChange={e => setClientProfile(e.target.value)}
+            style={{ width: "100%", padding: "5px 8px", fontSize: 12, borderRadius: 6, border: "1px solid #ccc", background: "#fff", color: clientProfile ? "#222" : "#888", cursor: "pointer" }}>
+            <option value="">Not recorded</option>
+            {riskLadder.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </div>
+
         {secLabel("Adviser")}
         {textRow("FSP practice", fspPractice, setFspPractice)}
         {textRow("FSP code", fspCode, setFspCode)}
@@ -2532,6 +2589,7 @@ export default function App() {
                 {clientName && <strong style={{ color: "#333" }}>{clientName}</strong>}
                 {clientId && <>{clientName ? " · " : ""}ID {clientId}</>}
                 {clientAge !== null && <> · age {clientAge}</>}
+                {clientProfile && <> · profiled {clientProfile}</>}
               </div>
             )}
             {(adviserName || adviserCode || fspPractice || fspCode) && (
@@ -2687,6 +2745,57 @@ export default function App() {
             {bucketView.runwayEnds && !bucketView.overCommitted && (
               <div style={{ fontSize: 11, color: "#888", padding: "0 16px 6px" }}>
                 Illustration: left to run down on its own at the expected return, bucket 1 would last until <strong style={{ color: "#555" }}>{bucketView.runwayEnds}</strong> ({Math.floor((bucketView.runwayMonths ?? 0) / 12)} yrs {(bucketView.runwayMonths ?? 0) % 12} mths). Volatility is ignored, and nothing is topped up from the other buckets.
+              </div>
+            )}
+
+            {/* The split is an allocation decision, so it implies a risk profile whether or not
+                anyone chose one. Shown against the questionnaire's answer so a difference is
+                explained in the record rather than found later. */}
+            {profileCheck && (
+              <div className="avoid-break" style={{ margin: "0 16px 12px", border: "1px solid #eee", borderRadius: 8, overflow: "hidden" }}>
+                <div style={{ padding: "9px 14px", background: "#fafafa", borderBottom: "1px solid #eee", fontSize: 12, fontWeight: 600, color: "#444" }}>
+                  Risk profile check
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 150, padding: "10px 14px", borderRight: "1px solid #eee" }}>
+                    <div style={{ fontSize: 11, color: "#888" }}>Profiled</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: clientProfile ? "#222" : "#bbb" }}>
+                      {clientProfile || "Not recorded"}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#bbb" }}>from the questionnaire</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 150, padding: "10px 14px", borderRight: "1px solid #eee" }}>
+                    <div style={{ fontSize: 11, color: "#888" }}>Implied by the structure</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#185FA5" }}>{profileCheck.impliedRisk}</div>
+                    <div style={{ fontSize: 10, color: "#bbb" }}>nearest: {profileCheck.nearestModel}</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 150, padding: "10px 14px" }}>
+                    <div style={{ fontSize: 11, color: "#888" }}>What the cover fixes</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#222" }}>
+                      {profileCheck.growth.toFixed(0)}% growth
+                    </div>
+                    <div style={{ fontSize: 10, color: "#bbb" }}>
+                      {profileCheck.coverYears} yrs cover · vol ≈ {profileCheck.impliedVol.toFixed(1)}%
+                    </div>
+                  </div>
+                </div>
+                <div style={{ padding: "10px 14px", borderTop: "1px solid #eee", fontSize: 11, lineHeight: 1.6,
+                  color: profileCheck.steps === null ? "#888" : profileCheck.steps === 0 ? "#1a7a4a" : "#993C1D",
+                  background: profileCheck.steps === null ? "#fff" : profileCheck.steps === 0 ? "#f2faf6" : "#fff7ed" }}>
+                  {profileCheck.steps === null ? (
+                    <>Record the client's risk profile above to compare it against the structure.</>
+                  ) : profileCheck.steps === 0 ? (
+                    <>The structure matches the profile. {profileCheck.coverYears} years of cover at this drawdown rate leaves {profileCheck.growth.toFixed(0)}% in growth assets, which sits on the <strong>{profileCheck.impliedRisk}</strong> rung.</>
+                  ) : (
+                    <>
+                      <strong>The structure is {Math.abs(profileCheck.steps)} step{Math.abs(profileCheck.steps) > 1 ? "s" : ""} {profileCheck.steps > 0 ? "more adventurous" : "more cautious"} than the profile.</strong>
+                      {" "}{profileCheck.coverYears} years of cover at this drawdown rate leaves {profileCheck.growth.toFixed(0)}% in growth assets — a <strong>{profileCheck.impliedRisk}</strong> portfolio — against a client profiled <strong>{clientProfile}</strong>.
+                      {profileCheck.steps < 0
+                        ? <> Cover and drawdown rate together set the defensive share, so a higher income automatically produces a more cautious portfolio. Either reduce the cover, or record why a client profiled {clientProfile} is being placed below that.</>
+                        : <> Either increase the cover, or record why a client profiled {clientProfile} is being placed above that.</>}
+                    </>
+                  )}
+                </div>
               </div>
             )}
 
