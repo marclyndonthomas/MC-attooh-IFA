@@ -47,6 +47,22 @@ Currency labels are in ZAR (R), but the model is currency-agnostic — the numbe
   in step by hand. The switch is gated on the unswitched view, so turning it off does not take
   the switch away with it. Off or on, the simulation is identical: the overlay never reaches the
   engine, and the state is saved with the plan.
+- **Advice annexure** — a second printed document, built against a generic FAIS-shaped Record of
+  Advice, for attaching to the adviser's own ROA. It carries client and adviser details, the risk
+  profile comparison with space to record a difference, what was modelled, the projection evidence,
+  the assumptions, the limitations, and signature blocks.
+
+  Two things about it are deliberate. The **basis of the recommendation** leads with the paired
+  comparison — the same plan replayed on identical market paths with and without the rule — rather
+  than a bare success rate, because a probability is a fact about the assumptions while a
+  like-for-like difference survives them. And it states the **bounded commitment**: the most the
+  income can fall in a year, disclosed in advance.
+
+  It also prints, in full, **what it does not cover** — product and platform selection, whether an
+  annuity would suit better, replacement disclosures, fee reasonableness, and the client's own
+  objectives and position — with blank fields for the adviser to complete. Sections the simulator
+  cannot populate are printed as blanks rather than omitted, so a reader sees what is still owed.
+  The closing paragraph states plainly that the annexure is not advice and is not a Record of Advice.
 - **Save as PDF** — prints a client report through the browser's own *Save as PDF* destination,
   so there is no PDF library and it honours the user's paper size. The sidebar, tab bar and
   controls drop out; the header carries the client, adviser and FSP details plus the date the

@@ -249,6 +249,7 @@ export default function App() {
   const c3Ref = useRef<HTMLCanvasElement | null>(null); const c3Inst = useRef<any>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [planNote, setPlanNote] = useState<string | null>(null);
+  const [docMode, setDocMode] = useState<"report" | "roa">("report");   // which document prints
 
   /**
    * Everything that makes up a client's plan, as a name -> [value, setter] registry.
@@ -476,8 +477,21 @@ export default function App() {
    * own paper size and margins.
    */
   const printReport = () => {
+    setDocMode("report");
     setTab("sim");
     // Let the tab switch paint first; printing from the same tick captures the Clients panel.
+    setTimeout(() => window.print(), 80);
+  };
+
+  /**
+   * The advice annexure. A separate document from the client report, because it answers a
+   * different question: not "what might happen" but "what was recommended, on what evidence,
+   * and what this analysis does not cover". The sections it cannot populate are printed as
+   * blanks rather than omitted, so a reader can see what is still owed.
+   */
+  const printRoa = () => {
+    setDocMode("roa");
+    setTab("sim");
     setTimeout(() => window.print(), 80);
   };
 
@@ -1965,7 +1979,7 @@ export default function App() {
   );
 
   return (
-    <div className="mc-shell" style={{ display: "flex", border: "1px solid #e0e0e0", borderRadius: 12, overflow: "hidden", fontFamily: "system-ui,sans-serif", background: "#fff", minHeight: 500 }}>
+    <div className={"mc-shell" + (docMode === "roa" ? " mode-roa" : "")} style={{ display: "flex", border: "1px solid #e0e0e0", borderRadius: 12, overflow: "hidden", fontFamily: "system-ui,sans-serif", background: "#fff", minHeight: 500 }}>
 
       {/*
         Print layout. The dashboard keeps its results in panels that scroll inside themselves,
@@ -1989,7 +2003,12 @@ export default function App() {
           canvas { max-width: 100% !important; height: auto !important; }
           .avoid-break { break-inside: avoid; page-break-inside: avoid; }
           tr, .mc-row { break-inside: avoid; page-break-inside: avoid; }
+          /* Two documents share one page. The annexure replaces the projection report rather
+             than following it, so each prints as its own document. */
+          .mc-shell.mode-roa .mc-report { display: none !important; }
+          .mc-shell.mode-roa .roa-doc  { display: block !important; }
         }
+        .roa-doc { display: none; }
       `}</style>
 
       {/* SIDEBAR */}
@@ -2015,12 +2034,20 @@ export default function App() {
               e.target.value = "";   // so re-opening the same file still fires
             }} />
         </div>
-        <button onClick={printReport} disabled={!results} title={results ? "" : "Run the simulation first"}
-          style={{ width: "100%", padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6, marginBottom: 6,
-            border: "1px solid " + (results ? "#444" : "#ddd"), background: "#fff",
-            color: results ? "#444" : "#ccc", cursor: results ? "pointer" : "not-allowed" }}>
-          Save as PDF
-        </button>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+          <button onClick={printReport} disabled={!results} title={results ? "" : "Run the simulation first"}
+            style={{ flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6,
+              border: "1px solid " + (results ? "#444" : "#ddd"), background: "#fff",
+              color: results ? "#444" : "#ccc", cursor: results ? "pointer" : "not-allowed" }}>
+            Client report
+          </button>
+          <button onClick={printRoa} disabled={!results} title={results ? "" : "Run the simulation first"}
+            style={{ flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6,
+              border: "1px solid " + (results ? "#444" : "#ddd"), background: "#fff",
+              color: results ? "#444" : "#ccc", cursor: results ? "pointer" : "not-allowed" }}>
+            Advice annexure
+          </button>
+        </div>
         {planNote && <div style={{ fontSize: 10, color: "#888", marginBottom: 10 }}>{planNote}</div>}
         {!planNote && <div style={{ fontSize: 10, color: "#ccc", marginBottom: 10 }}>
           {dirName
@@ -2577,8 +2604,198 @@ export default function App() {
           </div>
         )}
 
+        {/* The advice annexure. Print-only, and replaces the report rather than following it. */}
+        {(() => {
+          const line = { borderBottom: "1px solid #ddd", minHeight: 15, marginTop: 3 } as const;
+          const H = ({ n, t }: { n: string; t: string }) => (
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#222", marginTop: 16, marginBottom: 6, borderBottom: "1.5px solid #222", paddingBottom: 3 }}>
+              {n}. {t}
+            </div>
+          );
+          const F = ({ k, v }: { k: string; v: any }) => (
+            <div style={{ display: "flex", gap: 8, fontSize: 11, padding: "2px 0" }}>
+              <span style={{ color: "#777", minWidth: 165 }}>{k}</span>
+              <span style={{ color: "#222", fontWeight: 500 }}>{v || "—"}</span>
+            </div>
+          );
+          const Blank = ({ k, rows = 2 }: { k: string; rows?: number }) => (
+            <div style={{ marginBottom: 9 }}>
+              <div style={{ fontSize: 11, color: "#777" }}>{k}</div>
+              {Array.from({ length: rows }).map((_, i) => <div key={i} style={line} />)}
+            </div>
+          );
+          // The bad year the client is told about in advance: the reduction where it is on,
+          // otherwise the most a withheld increase can remove, which inflation alone decides.
+          const worstYear = cutOn ? cutTotal : 100 * (inflation / 100) / (1 + inflation / 100);
+          const g = results?.guard ?? null;
+          return (
+            <div className="roa-doc" style={{ padding: "0 4px", fontSize: 11, lineHeight: 1.5, color: "#222" }}>
+              <div style={{ borderBottom: "2px solid #222", paddingBottom: 8, marginBottom: 4 }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>Record of Advice — supporting annexure</div>
+                <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
+                  Projection evidence for the recommendation. Attach to the Record of Advice; it does not replace it.
+                  {" "}Prepared {new Date().toLocaleDateString("en-ZA", { day: "2-digit", month: "long", year: "numeric" })}.
+                </div>
+              </div>
+
+              <H n="1" t="Client and adviser" />
+              <div style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  <F k="Client" v={clientName} />
+                  <F k="ID number" v={clientId} />
+                  <F k="Date of birth" v={clientDob} />
+                  <F k="Age" v={clientAge !== null ? clientAge : ""} />
+                </div>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  <F k="FSP practice" v={fspPractice} />
+                  <F k="FSP number" v={fspCode} />
+                  <F k="Adviser" v={adviserName} />
+                  <F k="Representative number" v={adviserCode} />
+                </div>
+              </div>
+
+              <H n="2" t="Risk profile" />
+              {profileCheck ? (
+                <>
+                  <F k="Profiled (questionnaire)" v={clientProfile} />
+                  <F k="Implied by the structure" v={`${profileCheck.impliedRisk} · ${profileCheck.growth.toFixed(0)}% growth, ${profileCheck.coverYears} yrs cover, volatility ≈ ${profileCheck.impliedVol.toFixed(1)}%`} />
+                  <div style={{ marginTop: 5, padding: "6px 9px", background: "#f6f6f4", border: "1px solid #e4e2dd" }}>
+                    {profileCheck.steps === null
+                      ? <>No profile recorded, so no comparison has been made. The structure implies a <strong>{profileCheck.impliedRisk}</strong> portfolio.</>
+                      : profileCheck.steps === 0
+                      ? <>The structure is consistent with the recorded profile.</>
+                      : <>
+                          <strong>Difference: the structure is {Math.abs(profileCheck.steps)} step{Math.abs(profileCheck.steps) > 1 ? "s" : ""} {profileCheck.steps > 0 ? "more adventurous" : "more cautious"} than the recorded profile.</strong>
+                          {" "}Years of cover multiplied by the drawdown rate fixes the defensive share, so the cover chosen determines the allocation.
+                          {profileCheck.steps < 0 && <> A higher income therefore produces a more cautious portfolio automatically.</>}
+                        </>}
+                  </div>
+                  {profileCheck.steps !== null && profileCheck.steps !== 0 && <Blank k="Reason for the difference, and why it remains suitable" rows={3} />}
+                </>
+              ) : <div style={{ color: "#777" }}>No drawing plan modelled, so no structure to compare.</div>}
+
+              <H n="3" t="What was modelled" />
+              <div style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  <F k="Capital" v={fmt(init)} />
+                  <F k="Plan covers" v={planMode === "pre" ? "Saving" : planMode === "post" ? "Drawing" : "Saving then drawing"} />
+                  {planMode === "both" && <F k="Retirement date" v={retireDate} />}
+                  <F k="Term modelled" v={`${years} years`} />
+                </div>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  {planDraws && <F k="Income at outset" v={`${fmt(spendPolicy === "endowment" ? init * spendRate / 100 / 12 : withdraw)}/mo`} />}
+                  <F k="Income policy" v={spendPolicy === "endowment"
+                    ? `Income Review · ${spendRate.toFixed(2)}% target, ${smoothing}/${100 - smoothing} smoothing`
+                    : `Fixed escalation${effEsc > 0 ? ` at ${effEsc.toFixed(1)}%/yr` : ", none"}`} />
+                  <F k="Annual review rule" v={skipMode === "guard"
+                    ? `Funding level — hold below ${guardBand}% funded or below starting value${cutOn ? `; reduce to a ${cutTotal}% total real reduction below ${cutAt}% funded` : ""}`
+                    : skipMode === "health" ? "Health score" : skipMode === "negative" ? "Hold after a negative year"
+                    : skipMode === "fixed" ? `Hold every ${skipEvery} years` : "None"} />
+                </div>
+              </div>
+
+              <H n="4" t="Basis of the recommendation — projection evidence" />
+              {results ? (
+                <>
+                  <div style={{ marginBottom: 7 }}>
+                    <strong>Outcome range.</strong> Across {sims.toLocaleString()} simulated return sequences, the plan
+                    supported the income for the full {years} years in <strong>{results.pctSuccess}%</strong> of them.
+                    {planDraws && results.drawnMedian > 0 && <> Median income drawn over the term: <strong>{fmt(results.drawnMedian)}</strong> ({fmt(results.drawnMedianReal)} in today's money).</>}
+                    {" "}Median capital remaining {fmt(results.p50)}; a poor case (5th percentile) {fmt(results.p5)}.
+                  </div>
+                  {g && skipMode === "guard" && (
+                    <div style={{ marginBottom: 7 }}>
+                      <strong>Why this review rule.</strong> Replayed on the <em>same</em> simulated market paths, the plan
+                      survived <strong>{results.pctSuccess}%</strong> of them under the recommended rule against
+                      {" "}<strong>{g.pctSuccessNoGuard}%</strong> with no rule — a like-for-like comparison rather than two
+                      separate exercises. The rule acted in {g.pctPathsEverFrozen}% of scenarios, on average {results.avgSkip} times per plan
+                      {cutOn && <> (including {results.avgCut} explicit reductions, affecting {results.pctPathsCut}% of scenarios)</>}.
+                    </div>
+                  )}
+                  <div style={{ marginBottom: 7 }}>
+                    <strong>What the client is committing to.</strong> The income is reviewed annually against the capital
+                    still required to fund it. In a year the review acts, the income is
+                    {cutOn ? <> reduced so the total reduction reaches <strong>{worstYear.toFixed(1)}% in real terms</strong></>
+                           : <> held rather than increased, a real reduction of <strong>{worstYear.toFixed(1)}%</strong> at the inflation assumption used</>}.
+                    That figure is bounded and is disclosed in advance.
+                  </div>
+                  <div style={{ fontSize: 10, color: "#666" }}>
+                    Longevity and income figures are stated together deliberately: any rule that links income to the
+                    portfolio can improve the survival figure by paying the client less, so neither figure means much alone.
+                  </div>
+                </>
+              ) : <div style={{ color: "#777" }}>No simulation has been run.</div>}
+
+              <H n="5" t="Assumptions the projection rests on" />
+              <div style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  <F k="Expected return" v={`${ret.toFixed(1)}%/yr before fees`} />
+                  <F k="Fees deducted" v={otherFees > 0 ? `advice ${adviceFee.toFixed(2)}% + platform ${platformFee.toFixed(2)}% = ${(ret - otherFees).toFixed(2)}% net` : "none entered"} />
+                  <F k="Volatility" v={`${vol.toFixed(1)}%/yr`} />
+                  <F k="Model portfolio" v={activeModel ? activeModel.name : "Custom (entered manually)"} />
+                </div>
+                <div style={{ flex: 1, minWidth: 230 }}>
+                  <F k="Inflation" v={`${inflation.toFixed(1)}%/yr`} />
+                  <F k="Simulated paths" v={sims.toLocaleString()} />
+                  {skipMode === "guard" && <F k="Real discount rate" v={`${realDisc.toFixed(1)}%`} />}
+                  {skipMode === "guard" && <F k="Income planned to age" v={planToAge} />}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: "#666", marginTop: 5 }}>
+                These are assumptions, not forecasts, and they were chosen by the adviser. The outcome figures move with
+                them — materially so with the volatility and the discount rate. A different but equally defensible set
+                would produce different figures.
+              </div>
+
+              <H n="6" t="Limitations disclosed to the client" />
+              <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>
+                <li>A Monte Carlo simulation shows a range of possible outcomes. It does not forecast any of them.</li>
+                <li>Returns are drawn from a normal distribution, which understates the chance of a severe market fall.</li>
+                <li>Figures are before tax and assume no change in legislation.</li>
+                <li>The simulation applies one blended return and volatility to the whole portfolio. Where a bucket
+                    structure is shown, it illustrates the withdrawal and liquidity arrangement only.</li>
+                <li>Past performance is not a guide to future returns.</li>
+              </ul>
+
+              <H n="7" t="What this annexure does not cover" />
+              <div style={{ marginBottom: 4 }}>The following are not addressed by the projection and must be recorded in the Record of Advice itself:</div>
+              <ul style={{ margin: "0 0 6px", paddingLeft: 16 }}>
+                <li>Product and platform selection — no products were compared</li>
+                <li>Whether a guaranteed or hybrid annuity would better suit the client — mortality pooling is not modelled</li>
+                <li>Replacement of any existing product, and the disclosures that requires</li>
+                <li>Whether the fees used are reasonable or competitive — they were entered, not benchmarked</li>
+                <li>The client's objectives, needs, existing arrangements and financial position</li>
+              </ul>
+
+              <H n="8" t="To be completed by the adviser" />
+              <Blank k="Client's objectives and needs as disclosed" rows={3} />
+              <Blank k="Products and alternatives considered, and why this one was selected" rows={3} />
+              <Blank k="Replacement: is any existing product being replaced? If so, the comparison and disclosures made" rows={3} />
+              <Blank k="Any information the client declined to provide, and the effect on the advice" rows={2} />
+              <Blank k="Risks and disadvantages specifically discussed" rows={3} />
+
+              <H n="9" t="Acknowledgement" />
+              <div style={{ display: "flex", gap: 26, marginTop: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ borderBottom: "1px solid #222", height: 26 }} />
+                  <div style={{ fontSize: 10, color: "#666", marginTop: 3 }}>Client signature · date</div>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ borderBottom: "1px solid #222", height: 26 }} />
+                  <div style={{ fontSize: 10, color: "#666", marginTop: 3 }}>Adviser signature · date</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 9.5, color: "#888", marginTop: 12, borderTop: "1px solid #ddd", paddingTop: 6 }}>
+                This annexure records the output of a planning simulation and the assumptions behind it. It is not advice
+                and is not a Record of Advice. The advice, and responsibility for it, rests with the representative and
+                the financial services provider named in section 1.
+              </div>
+            </div>
+          );
+        })()}
+
         {/* display:contents keeps the existing layout untouched while the Clients tab is up. */}
-        <div style={{ display: tab === "sim" || !FS_OK ? "contents" : "none" }}>
+        <div className="mc-report" style={{ display: tab === "sim" || !FS_OK ? "contents" : "none" }}>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #eee" }}>
           <div>
